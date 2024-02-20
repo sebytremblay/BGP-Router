@@ -1,0 +1,470 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math
+import copy
+
+class Router:
+
+    relations = {}
+    sockets = {}
+    ports = {}
+    
+    updates = []
+    forwarding_table = {}
+
+    def __init__(self, asn, connections):
+        """Initializes the router with its ASN and connections to other routers.
+
+        Args:
+            asn (int): The AS number of the router.
+            connections (list): A list of strings, each of which represents a connection to another router. 
+            Each string is in the format "port-neighbor-relation", where "port" is the port number on which 
+            the router should listen for messages from "neighbor", and "relation" is the relationship between 
+            the routers (either "peer" or "provider").
+        """
+        print("Router at AS %s starting up" % asn)
+        self.asn = asn
+        for relationship in connections:
+            port, neighbor, relation = relationship.split("-")
+
+            self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sockets[neighbor].bind(('localhost', 0))
+            self.ports[neighbor] = int(port)
+            self.relations[neighbor] = relation
+            print(f"Connected to {neighbor} on port {port} with relation {relation}")
+            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
+
+    def our_addr(self, dst):
+        """Returns the IP address of the router on the interface leading to the specified destination.
+
+        Args:
+            dst (str): The name of the destination router.
+
+        Returns:
+            str: The IP address of the router on the interface leading to the specified destination.
+        """
+        quads = list(int(qdn) for qdn in dst.split('.'))
+        quads[3] = 1
+        return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
+
+    def send(self, network, message):
+        """Sends a message to the specified network.
+        
+        Args:
+            network (str): The name of the network to which the message should be sent.
+            message (str): The message to send, which will be encoded as JSON.
+        """
+        # if network not in self.sockets or network not in self.ports:
+        #     print(f"Error: Network {network} is not configured correctly.")
+        #     return
+        
+        # # Ensure the message is a string encoded in UTF-8 and serialized as JSON
+        # encoded_message = json.dumps(message).encode('utf-8')
+        
+        # # Retrieve the socket and port for the specified network
+        # sock = self.sockets[network]
+        # port = self.ports[network]
+        
+        # try:
+        #     # Send the encoded message to the 'localhost' at the specified port
+        #     sock.sendto(encoded_message, ('localhost', port))
+        # except Exception as e:
+        #     print(f"Failed to send message to network {network}: {e}")
+        self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
+
+    def run(self):
+        """Runs the router's main loop."""
+        while True:
+            socks = select.select(self.sockets.values(), [], [], 0.1)[0]
+            for conn in socks:
+                k, addr = conn.recvfrom(65535)
+                srcif = None
+                for sock in self.sockets:
+                    if self.sockets[sock] == conn:
+                        srcif = sock
+                        break
+                msg = k.decode('utf-8')
+                
+                self.handle_incoming_message(srcif, msg)
+
+                # print("Received message '%s' from %s" % (msg, srcif))
+    
+    def handle_incoming_message(self, srcif, message):
+        """Process incoming messages from neighbors.
+        
+        Args:
+            srcif (str): The name of the interface on which the message was received.
+            message (str): The message that was received."""
+        # Attempt to parse the message as JSON
+        try:
+            json_message = json.loads(message)
+        except Exception as e:
+            print(f"Error parsing JSON message: {e}")
+            return
+        
+        # Ensure the message contains a 'type' field
+        if 'type' not in json_message:
+            print("Error: Received message does not contain a 'type' field.")
+            return
+
+        # Determine the type of message and process it accordingly
+        message_type = json_message['type']
+        if message_type == 'update':
+            self.process_route_update(srcif, json_message)
+        elif message_type == 'withdraw':
+            self.process_route_withdrawal(json_message['src'], json_message['dst'])
+        elif message_type == 'data':
+            self.process_data(json_message['src'], json_message['dst'], json_message['payload'])
+        elif message_type == 'handshake':
+            self.process_handshake(json_message['src'], json_message['dst'])
+        elif message_type == 'dump':
+            self.process_dump(json_message['src'], json_message['table'])
+        elif message_type == 'table' or message_type == 'no route':
+            raise NotImplementedError()
+        else:
+            print(f"Unknown message type received: {message_type}")
+            
+    def process_handshake(self, src, dst):
+        """Process handshake messages to establish connections with neighbors.
+        
+        Args:
+            src (str): The source IP address of the handshake.
+            dst (str): The destination IP address of the handshake.
+        """
+        # Acknowledge the handshake for logging or debugging purposes
+        self.log_message(f"Handshake established with {src}.") 
+
+    def process_route_update(self, srcif, message):
+        """Update the forwarding table based on a received route update.
+        
+        Args:
+            srcif (str): The interface on which the update was received.
+            message (dict): The route update message.
+        """
+        # Extract route information from the message
+        network = message['msg']['network']
+        netmask = message['msg']['netmask']
+        localpref = message['msg']['localpref']
+        selfOrigin = message['msg']['selfOrigin']
+        ASPath = message['msg']['ASPath']
+        origin = message['msg']['origin']
+        
+        # Save the route to the cache
+        self.updates.append(message)
+
+        # Add or update the route in the forwarding table
+        self.forwarding_table[network] = {
+            'netmask': netmask,
+            'localpref': localpref,
+            'selfOrigin': selfOrigin,
+            'ASPath': ASPath,
+            'origin': origin,
+            'next_hop': srcif
+        }
+        
+        # Possibly send updates to neighbors based on BGP policies
+        self.propagate_update(srcif, message)
+    
+    def propagate_update(self, srcif, message):
+        """Propagates a route update to neighbors based on BGP policies.
+        
+        Args:
+            srcif (str): The interface on which the update was received.
+            message (dict): The route update message.
+        """
+        src_relationship = self.relations[srcif]
+
+        # Prepare the message to be sent to neighbors, excluding private fields
+        propagated_message = {
+            'msg': {
+                'netmask': message['msg']['netmask'],
+                'ASPath': [self.asn] + message['msg']['ASPath'],
+                'network': message['msg']['network']
+            },
+            'type': 'update',
+        }
+
+        # Determine which neighbors to send the update to
+        for neighbor, relation in self.relations.items():
+            if neighbor != srcif:  # Do not send the update back to the source
+                # Update neighbor specific messaging
+                propagated_message['src'] = self.our_addr(neighbor)
+                propagated_message['dst'] = neighbor
+                
+                # Rule 1: If update received from a customer, send to all other neighbors
+                if src_relationship == 'cust':
+                    self.send(neighbor, json.dumps(propagated_message))
+                    
+                # Rule 2: If update received from a peer or provider, only send to customers
+                elif src_relationship in ['peer', 'provider'] and relation == 'cust':
+                    self.send(neighbor, json.dumps(propagated_message))
+                
+                # Otherwise log that we could not forward anywhere
+                else:
+                    print("Did not send anywhere.")
+        
+    def process_route_withdrawal(self, src, dst):
+        """Remove a route from the forwarding table.
+        
+        Args:
+            src: The source of the withdrawal.
+            dst: The destination network of the route being withdrawn.
+        """
+        # Withdraw the route from the forwarding table
+        if dst in self.forwarding_table:
+            del self.forwarding_table[dst]
+            
+            # Drop the current forwarding table and request a new one from all neighbors
+            self.log_message(f"Route to {dst} withdrawn.")
+    
+    def process_data(self, src, dst, payload):
+        """Process a data packet received from a neighbor.
+
+        Args:
+            src (str): The source of the data packet.
+            dst (str): The destination of the data packet.
+            payload (str): The payload of the data packet."""
+        # If we do not know where this packet should go, send no route message
+        if dst not in self.forwarding_table:
+            self.send(src, json.dumps({'type': 'no route', 'src': dst, 'dst': src}))
+            return
+        
+        # Finds all possible routes
+        possible_routes = []
+        for network in self.forwarding_table.keys():
+            if network == dst:
+                possible_routes.append(network)
+        
+        # If table knows exactly one route, send to that route
+        if len(possible_routes) == 1:
+            self.send_to_route(self.ports[possible_routes[0]], payload)
+        
+        # If table knows multiple routes, send to the best route
+        elif len(possible_routes) > 1:
+            best_route = self.find_best_route(src, dst)
+            self.send_to_route(self.ports[best_route], payload)
+        
+    def find_best_route(self, src, dst):
+        """Find the best route to the destination in the forwarding table.
+
+        Args:
+            src (_type_): _description_
+            dst (_type_): _description_
+        """
+        # Finds all possible routes
+        possible_routes = []
+        for network in self.forwarding_table.keys():
+            if network == dst:
+                possible_routes.append(network)
+                
+        # Chooses the longest prefix match
+        longest_prefix_route = None
+        longest_prefix = 0
+        
+        for route in possible_routes:
+            route_port = self.ports[route] 
+            
+            if len(route_port) > longest_prefix:
+                longest_prefix = len(route_port)
+                longest_prefix_route = route
+                
+        return longest_prefix_route
+    
+    def send_to_route(self, port_num, payload):
+        """Send a data packet to the specified route in the forwarding table.
+
+        Args:
+            port_num (_type_): _description_
+            payload (_type_): _description_
+        """
+        # Find the corresponding network in the forwarding table
+        found_neighbor = ''
+        for neighbor, port in self.ports.items():
+            if port == port_num:
+                found_neighbor = neighbor
+                break
+        
+        # Send the message the netwrok
+        self.send(found_neighbor, payload)
+    
+    def send_no_route_message(self, src, dst):
+        """Informs the source that no route to the destination exists.
+        
+        Args:
+            src (str): The source of the message.
+            dst (str): The destination of the message.
+        """
+        # Create the message
+        message = {
+            'src': self.our_addr(src),
+            'dst': src,
+            'type': 'no route',
+            'msg': {}
+        }
+        
+        # Send the message to the source
+        self.send(src, json.dumps(message)) 
+        
+    def process_dump(self, src, table):
+        """Process a dump of the neighbor's forwarding table.
+
+        Args:
+            src (str): The source of the dump.
+            table (dict): The forwarding table of the neighbor."""
+        pass
+
+    def announce_routes(self):
+        """
+        Announce routes to neighbors.
+        """
+        pass
+
+    def withdraw_route(self, dest):
+        """
+        Withdraw a previously announced route.
+        """
+        pass
+
+    def ip_to_int(self, ip):
+        """Converts an IP address from string format to an integer.
+        
+        Args:
+            ip (str): The IP address to convert.
+            
+        Returns:
+            int: The integer representation of the IP address."""
+        return sum(int(byte) << (8 * idx) for idx, byte in enumerate(reversed(ip.split('.'))))
+
+    def int_to_ip(self, integer):
+        """Converts an integer back to an IP address string.
+        
+        Args:
+            integer (int): The integer to convert.
+            
+        Returns:
+            str: The string representation of the IP address."""
+        return '.'.join(str((integer >> (8 * i)) & 0xFF) for i in reversed(range(4)))
+
+    def aggregate_routes(self):
+        """Aggregate numerically adjacent routes in the forwarding table that have the same next-hop
+        and identical attributes.
+        """
+        # Sort routes based on network address (converted to integer for comparison)
+        self.forwarding_table.sort(key=lambda x: self.ip_to_int(x['network']))
+        aggregated = False
+        
+        i = 0
+        while i < len(self.forwarding_table) - 1:
+            route1 = self.forwarding_table[i]
+            route2 = self.forwarding_table[i + 1]
+            
+            # Check if routes are adjacent and have the same next-hop and attributes
+            if self.are_adjacent(route1, route2) and self.have_same_attributes(route1, route2):
+                # Aggregate routes
+                new_route = self.aggregate(route1, route2)
+                self.forwarding_table[i] = new_route
+                del self.forwarding_table[i + 1]
+                aggregated = True
+            else:
+                i += 1
+        
+        # If any routes were aggregated, repeat the process in case further aggregation is possible
+        if aggregated:
+            self.aggregate_routes()
+
+    def are_adjacent(self, route1, route2):
+        """
+        Determine if two routes are numerically adjacent.
+        
+        Args:
+            route1 (dict): The first route, with 'network' and 'netmask' keys.
+            route2 (dict): The second route, with 'network' and 'netmask' keys.
+            
+        Returns:
+            bool: True if route1 and route2 are adjacent, False otherwise.
+        """
+        # Convert the network addresses and netmasks to integers
+        network1 = self.ip_to_int(route1['network'])
+        netmask1 = self.ip_to_int(route1['netmask'])
+        network2 = self.ip_to_int(route2['network'])
+        netmask2 = self.ip_to_int(route2['netmask'])
+
+        # Calculate the broadcast address of the first network
+        broadcast1 = network1 | (~netmask1 & 0xFFFFFFFF)
+
+        # The second network is adjacent if its network address is one more than the broadcast address of the first
+        return network2 == broadcast1 + 1
+
+
+    def have_same_attributes(self, route1, route2):
+        """Check if two routes have the same attributes.
+        
+        Args:
+            route1 (dict): The first route to compare.
+            route2 (dict): The second route to compare.
+            
+        Returns:
+            bool: Whether the routes have the same attributes."""
+        return route1['localpref'] == route2['localpref'] \
+            and route1['origin'] == route2['origin'] \
+            and route1['ASpth'] == route2['ASpth'] \
+            and route1['selfOrigin'] == route2['selfOrigin'] \
+
+    def aggregate(self, route1, route2):
+        """
+        Aggregate two adjacent routes into one. Assumes that the routes are adjacent
+        and have the same netmask, next-hop, and other relevant attributes.
+
+        Args:
+            route1 (dict): The first route to aggregate.
+            route2 (dict): The second route to aggregate.
+
+        Returns:
+            dict: A new route that represents the aggregation of route1 and route2.
+        """
+        # Convert netmask to integer for comparison and calculation
+        netmask_int = self.ip_to_int(route1['netmask'])
+        
+        # Calculate the new netmask by subtracting one from the binary representation's length
+        new_netmask_int = (netmask_int << 1) & 0xFFFFFFFF
+        new_netmask = self.int_to_ip(new_netmask_int)
+        
+        # The new network is the lower of the two original networks under the new netmask
+        new_network_int = self.ip_to_int(route1['network']) & new_netmask_int
+        new_network = self.int_to_ip(new_network_int)
+
+        # Return a new route with the aggregated network and netmask, and the same attributes
+        return {
+            'network': new_network,
+            'netmask': new_netmask,
+            'localpref': route1['localpref'],
+            'selfOrigin': route1['selfOrigin'],
+            'ASpth': route1['ASpth'],
+            'origin': route1['origin'],
+        }
+
+    def select_best_path(self):
+        """
+        Select the best path for each destination based on the routing policy.
+        """
+        pass
+
+    def log_message(self, message):
+        """
+        Helper method for logging messages.
+        """
+        print(message)
+
+    def shutdown(self):
+        """
+        Cleanly shut down the router, closing any open connections.
+        """
+        pass
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='route packets')
+    parser.add_argument('asn', type=int, help="AS number of this router")
+    parser.add_argument('connections', metavar='connections', type=str, nargs='+', help="connections")
+    args = parser.parse_args()
+    router = Router(args.asn, args.connections)
+    router.run()
