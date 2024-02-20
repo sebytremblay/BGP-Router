@@ -114,7 +114,7 @@ class Router:
         elif message_type == 'withdraw':
             self.process_route_withdrawal(json_message['src'], json_message['dst'])
         elif message_type == 'data':
-            self.process_data(json_message['src'], json_message['dst'], json_message['payload'])
+            self.process_data(json_message['src'], json_message['dst'], json_message['msg'])
         elif message_type == 'handshake':
             self.process_handshake(json_message['src'], json_message['dst'])
         elif message_type == 'dump':
@@ -142,6 +142,7 @@ class Router:
             message (dict): The route update message.
         """
         # Extract route information from the message
+        src = message['src']
         network = message['msg']['network']
         netmask = message['msg']['netmask']
         localpref = message['msg']['localpref']
@@ -153,7 +154,8 @@ class Router:
         self.updates.append(message)
 
         # Add or update the route in the forwarding table
-        self.forwarding_table[network] = {
+        self.forwarding_table[src] = {
+            'network': network,
             'netmask': netmask,
             'localpref': localpref,
             'selfOrigin': selfOrigin,
@@ -224,25 +226,35 @@ class Router:
             src (str): The source of the data packet.
             dst (str): The destination of the data packet.
             payload (str): The payload of the data packet."""
-        # If we do not know where this packet should go, send no route message
-        if dst not in self.forwarding_table:
-            self.send(src, json.dumps({'type': 'no route', 'src': dst, 'dst': src}))
+        # Convert destination IP to a format that matches your forwarding table keys
+        dst_network = dst
+        
+        # Send a 'no route' message back to the source if no route exists
+        if dst_network not in self.forwarding_table:
+            print(f"Sockets: {self.sockets}")
+            print(f"Our Address: {self.our_addr(src)}")
+            
+            print(f"Forwarding Table: {self.forwarding_table}")
+            
+            send_location = self.forwarding_table[self.our_addr(src)]['network']
+            print(f"Send location: {send_location}")
+            
+            self.send(send_location, json.dumps({'type': 'no route', 'src': self.our_addr(src), 'dst': dst}))
             return
         
-        # Finds all possible routes
-        possible_routes = []
-        for network in self.forwarding_table.keys():
-            if network == dst:
-                possible_routes.append(network)
+        routes = self.forwarding_table[dst_network]
+        if len(routes) == 1:
+            # If there's exactly one route, use it
+            next_hop = routes[0]['next_hop']
+        else:
+            # If there are multiple routes, select the best one based on your criteria (e.g., shortest ASPath, highest localpref)
+            best_route = self.find_best_route(routes)
+            next_hop = best_route['next_hop']
         
-        # If table knows exactly one route, send to that route
-        if len(possible_routes) == 1:
-            self.send_to_route(self.ports[possible_routes[0]], payload)
-        
-        # If table knows multiple routes, send to the best route
-        elif len(possible_routes) > 1:
-            best_route = self.find_best_route(src, dst)
-            self.send_to_route(self.ports[best_route], payload)
+        # Forward the packet to the next hop
+        print(f"Forwarding packet to {next_hop}. Payload: {payload}")
+        print(f"Sockets Table: {self.sockets}")
+        # self.send(next_hop, json.dumps({'type': 'data', 'src': self.our_addr(src), 'dst': dst, 'payload': payload}))
         
     def find_best_route(self, src, dst):
         """Find the best route to the destination in the forwarding table.
