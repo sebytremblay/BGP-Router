@@ -253,8 +253,11 @@ class Router:
             netmask = revocation['netmask']
 
             # Delete all entries in forward table with these attributes
-            delete_candidates = [self.forwarding_table[(network, netmask)]]
+            delete_candidates = self.forwarding_table[(network, netmask)]
             routes_to_delete = []
+            
+            pprint(f"Delete candidates: {delete_candidates}")
+            pprint(f"Table before withdraw: {self.forwarding_table}")
             
             for candidate in delete_candidates:
                 if candidate['peer'] == packet['src']:
@@ -263,24 +266,18 @@ class Router:
             # Process the route removal for each route
             pprint(f"Routes to delete: {routes_to_delete}")
             pprint(f"Table before withdraw: {self.forwarding_table}")
-            for router_key in deleted_routes:
-                # If route does not exist in our table, ignore
-                if router_key not in self.forwarding_table:
-                    continue
-                
-                # Otherwise, remove the route
-                del self.forwarding_table[router_key]
-                pprint(f"Removed route {router_key} from forwarding table")
-                pprint(f"Forwarding table after: {self.forwarding_table}")
-                
-                # Remove any cached updates to this route
-                self.remove_corresponding_updates(network, netmask)
+            
+            # Remove the route from the forwarding table
+            self.forwarding_table[(network, netmask)] = [route for route in delete_candidates if route not in routes_to_delete]
+            
+            # Remove any cached updates to this route
+            self.remove_corresponding_updates(network, netmask, packet['src'])
                         
         # print(f"Updates after finish: {self.updates}")
         
         # Rebuild the table
         prev_table = self.forwarding_table.copy()
-        self.rebuild_table(packet['src'])
+        # self.rebuild_table(packet['src'])
         print("="*80)
         pprint(f"Previous Table: {prev_table}")
         pprint(f"New Table: {self.forwarding_table}")
@@ -290,7 +287,7 @@ class Router:
         # Inform our neighbors of the withdrawal
         self.propagate_withdrawl(packet['src'], packet['msg'])
        
-    def remove_corresponding_updates(self, network, netmask):
+    def remove_corresponding_updates(self, network, netmask, src):
         """Removes all updates from the cache that correspond to a given route.
 
         Args:
@@ -302,7 +299,7 @@ class Router:
             # If update is improperly formatted, ignore
             if 'network' in update['msg'] and 'netmask' in update['msg']:
                 # Remove the update if it corresponds to the route
-                if update['msg']['network'] == network and update['msg']['netmask'] == netmask:
+                if update['msg']['network'] == network and update['msg']['netmask'] == netmask and update['src'] == src:
                     pprint(f"Removing update: {update}")
                     self.updates.remove(update)
             
@@ -332,7 +329,7 @@ class Router:
                 
                 # Otherwise log that we could not forward anywhere
                 else:
-                    print("Did not send anywhere.")
+                    print("Did not send anywhere.") 
     
     def rebuild_table(self, srcif):
         """Deletes and rebuilds our forwarding table.
@@ -363,11 +360,10 @@ class Router:
         
         # Attempt to find a route for the destination
         routes_found = []
-        for route_details in self.forwarding_table.values():
-            
-            network, netmask = route_details['network'], route_details['netmask']
+        for network, netmask in self.forwarding_table.keys():
             if self.ip_in_network(dst, network, netmask):
-                routes_found.append(route_details)
+                for route in self.forwarding_table[(network, netmask)]:
+                    routes_found.append(route)
         
         # If no route is found, send a "no route" message back to the source
         if len(routes_found) == 0:
@@ -508,7 +504,10 @@ class Router:
         self.aggregate_routes()
         
         # Convert the forwarding table to a list of routes
-        table = list(self.forwarding_table.values())
+        table = []
+        for route_list in self.forwarding_table.values():
+            for route in route_list:
+                table.append(route)
         
         for route in table:
             # Convert the network and netmask to strings for serialization
@@ -550,6 +549,7 @@ class Router:
         and aggregates routes where applicable. It repeats the process if any routes were aggregated to ensure
         all possible aggregations are completed.
         """
+        return
         # Convert forwarding table to a list of (route_key, route_details) for easier manipulation
         routes_list = sorted(self.forwarding_table.items(), key=lambda item: self.ip_to_int(item[1]['network']))
 
