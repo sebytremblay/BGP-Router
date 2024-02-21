@@ -142,7 +142,8 @@ class Router:
             # If it's an update, check if the new path is preferred based on your criteria
             # This is simplified; you'd typically compare AS path lengths, local pref, etc.
             existing_route = self.forwarding_table[route_key]
-            if len(ASPath) < len(existing_route['ASPath']):
+            
+            if self.compareRoutes(existing_route, message['msg']) == 1:
                 self.forwarding_table[route_key] = {'network': network,
                                                     'netmask': netmask,
                                                     'localpref': localpref,
@@ -282,11 +283,16 @@ class Router:
         # Send the message back to the source
         self.send(src, no_route_message)
         
-    def compareRoutes(route1, route2):
+    def compareRoutes(self, route1, route2):
         """Compare two routes based on specified criteria.
         
         Returns -1 if route1 is preferred, 1 if route2 is preferred, or 0 if they are equal.
         """
+        # Choose the longest prefix match
+        if self.netmask_to_prefix_length(route1['netmask']) != self.netmask_to_prefix_length(route2['netmask']):
+            return -1 if self.netmask_to_prefix_length(route1['netmask']) \
+                > self.netmask_to_prefix_length(route2['netmask']) else 1
+        
         # Compare by localpref
         if route1['localpref'] != route2['localpref']:
             return -1 if route1['localpref'] > route2['localpref'] else 1
@@ -308,6 +314,23 @@ class Router:
         route1_ip = int.from_bytes(socket.inet_aton(route1['next_hop']), 'big')
         route2_ip = int.from_bytes(socket.inet_aton(route2['next_hop']), 'big')
         return -1 if route1_ip < route2_ip else 1 if route1_ip > route2_ip else 0
+    
+    def netmask_to_prefix_length(self, netmask):
+        """
+        Convert a netmask to its corresponding prefix length.
+
+        Args:
+            netmask (str): The netmask in dotted decimal notation (e.g., "255.255.255.0").
+
+        Returns:
+            int: The prefix length (number of leading 1 bits in the netmask).
+        """
+        # Convert the netmask from dotted decimal notation to a binary string
+        netmask_bin = ''.join(format(int(octet), '08b') for octet in netmask.split('.'))
+        # Count the number of leading 1s in the binary representation
+        prefix_length = netmask_bin.count('1')
+        
+        return prefix_length
         
     def find_best_route(self, routes):
         """Find the best route based on the comparison function."""
@@ -439,7 +462,6 @@ class Router:
 
         # The second network is adjacent if its network address is one more than the broadcast address of the first
         return network2 == broadcast1 + 1
-
 
     def have_same_attributes(self, route1, route2):
         """Check if two routes have the same attributes.
