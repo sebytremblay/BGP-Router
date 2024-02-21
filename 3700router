@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
+from functools import cmp_to_key
 import copy
 
 class Router:
@@ -238,10 +239,12 @@ class Router:
             next_hop = routes_found[0]['next_hop']
             self.send(next_hop, json.dumps({'type': 'data', 'src': src, 'dst': dst, 'payload': payload}))
         elif len(routes_found) > 1:
-            # TODO
             best_route =  self.find_best_route(routes_found)
-            
-            
+            self.send(best_route['next_hop'], 
+                      json.dumps({'type': 'data', 
+                                  'src': src, 
+                                  'dst': dst, 
+                                  'payload': payload}))
 
     def ip_in_network(self, ip, network, netmask):
         """Check if an IP address is within a given network.
@@ -279,33 +282,39 @@ class Router:
         # Send the message back to the source
         self.send(src, no_route_message)
         
-    def find_best_route(self, routes):
-        """Find the best route to the destination in the forwarding table.
-
-        Args:
-            routes (list): A list of routes to the destination.
+    def compareRoutes(route1, route2):
+        """Compare two routes based on specified criteria.
+        
+        Returns -1 if route1 is preferred, 1 if route2 is preferred, or 0 if they are equal.
         """
-        # Sort routes by netmask length (longest prefix first)
-        routes.sort(key=lambda route: self.ip_to_int(route['netmask']), reverse=True)
-
-        # Then sort by localpref (highest first)
-        routes.sort(key=lambda route: route['localpref'], reverse=True)
-
-        # Then sort by selfOrigin (true first)
-        routes.sort(key=lambda route: route['selfOrigin'], reverse=True)
-
-        # Then sort by ASPath length (shortest first)
-        routes.sort(key=lambda route: len(route['ASPath']))
-
-        # Then sort by origin (IGP > EGP > UNK)
+        # Compare by localpref
+        if route1['localpref'] != route2['localpref']:
+            return -1 if route1['localpref'] > route2['localpref'] else 1
+        
+        # Compare by selfOrigin
+        if route1['selfOrigin'] != route2['selfOrigin']:
+            return -1 if route1['selfOrigin'] else 1
+        
+        # Compare by ASPath length
+        if len(route1['ASPath']) != len(route2['ASPath']):
+            return -1 if len(route1['ASPath']) < len(route2['ASPath']) else 1
+        
+        # Compare by origin
         origin_order = {'IGP': 0, 'EGP': 1, 'UNK': 2}
-        routes.sort(key=lambda route: origin_order[route['origin']])
-
-        # Finally, sort by neighbor IP (lowest first)
-        routes.sort(key=lambda route: self.ip_to_int(route['next_hop']))
-
-        # The best route is the first one in the sorted list
-        return routes[0]
+        if origin_order[route1['origin']] != origin_order[route2['origin']]:
+            return -1 if origin_order[route1['origin']] < origin_order[route2['origin']] else 1
+        
+        # Compare by neighbor IP
+        route1_ip = int.from_bytes(socket.inet_aton(route1['next_hop']), 'big')
+        route2_ip = int.from_bytes(socket.inet_aton(route2['next_hop']), 'big')
+        return -1 if route1_ip < route2_ip else 1 if route1_ip > route2_ip else 0
+        
+    def find_best_route(self, routes):
+        """Find the best route based on the comparison function."""
+        # Sort routes based on the comparison function
+        sorted_routes = sorted(routes, key=cmp_to_key(self.compareRoutes))
+        # Return the best route
+        return sorted_routes[0]
     
     def send_to_route(self, port_num, payload):
         """Send a data packet to the specified route in the forwarding table.
@@ -478,12 +487,6 @@ class Router:
             'ASPath': route1['ASPath'],
             'origin': route1['origin'],
         }
-
-    def select_best_path(self):
-        """
-        Select the best path for each destination based on the routing policy.
-        """
-        pass
 
     def log_message(self, message):
         """
