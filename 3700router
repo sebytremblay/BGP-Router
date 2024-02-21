@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
+from pprint import pprint
 from functools import cmp_to_key
 import copy
 
@@ -71,7 +72,7 @@ class Router:
 
                 # print("Received message '%s' from %s" % (msg, srcif))
     
-    def handle_incoming_message(self, srcif, message):
+    def handle_incoming_message(self, srcif, message, log=True):
         """Process incoming messages from neighbors.
         
         Args:
@@ -92,11 +93,11 @@ class Router:
         # Determine the type of message and process it accordingly
         message_type = json_message['type']
         if message_type == 'update':
-            self.process_route_update(srcif, json_message)
+            self.process_route_update(srcif, json_message, log)
         elif message_type == 'withdraw':
             self.process_route_withdrawal(json_message)
         elif message_type == 'data':
-            self.process_data(json_message['src'], json_message['dst'], json_message['msg'])
+            self.process_data(json_message, log)
         elif message_type == 'handshake':
             self.process_handshake(json_message['src'], json_message['dst'])
         elif message_type == 'dump':
@@ -123,6 +124,12 @@ class Router:
             srcif (str): The interface on which the update was received.
             message (dict): The route update message.
         """
+        # Do nothing is msg body does not have expect fields
+        expected_fields = ['network', 'netmask', 'localpref', 'ASPath', 'origin', 'selfOrigin']
+        for expected_field in expected_fields:
+            if expected_field not in message['msg']:
+                return
+        
         # Extract the relevant fields from the message
         network = message['msg']['network']
         netmask = message['msg']['netmask']
@@ -132,34 +139,51 @@ class Router:
         selfOrigin = message['msg']['selfOrigin']
 
         # Create a unique key for this route based on network and netmask
-        route_key = f"{network}/{netmask}/{ASPath[-1]}"
+        # Use only network and netmask, map to a list of routes
 
-        # Check if this is a new route or an update to an existing route
-        if route_key in self.forwarding_table:
-            # If it's an update, check if the new path is preferred based on your criteria
-            # This is simplified; you'd typically compare AS path lengths, local pref, etc.
-            existing_route = self.forwarding_table[route_key]
-            message['msg']['next_hop'] = srcif
+        # # Check if this is a new route or an update to an existing route
+        # if route_key in self.forwarding_table:
+        #     # If it's an update, check if the new path is preferred based on your criteria
+        #     # This is simplified; you'd typically compare AS path lengths, local pref, etc.
+        #     existing_route = self.forwarding_table[route_key]
+        #     message['msg']['next_hop'] = srcif
             
-            if self.compare_routes(existing_route, message['msg']) == 1:
-                self.forwarding_table[route_key] = {'origin': origin,
-                                                    'localpref': localpref,
-                                                    'network': network,
-                                                    'ASPath': ASPath,
-                                                    'netmask': netmask,
-                                                    'peer': srcif,
-                                                    'selfOrigin': selfOrigin,
-                                                    'next_hop': srcif}
+        #     if self.compare_routes(existing_route, message['msg']) == 1:
+        #         self.forwarding_table[route_key] = {'origin': origin,
+        #                                             'localpref': localpref,
+        #                                             'network': network,
+        #                                             'ASPath': ASPath,
+        #                                             'netmask': netmask,
+        #                                             'peer': srcif,
+        #                                             'selfOrigin': selfOrigin,
+        #                                             'next_hop': srcif}
+        # else:
+        #     # If it's a new route, add it directly
+        #     self.forwarding_table[route_key] = {'origin': origin,
+        #                                         'localpref': localpref,
+        #                                         'network': network,
+        #                                         'ASPath': ASPath,
+        #                                         'netmask': netmask,
+        #                                         'peer': srcif,
+        #                                         'selfOrigin': selfOrigin,
+        #                                         'next_hop': srcif}
+            
+        # Prepare the new route for the forwarding table
+        new_packet = {'origin': origin,
+                      'localpref': localpref,
+                      'network': network,
+                      'ASPath': ASPath,
+                      'netmask': netmask,
+                      'peer': srcif,
+                      'selfOrigin': selfOrigin,
+                      'next_hop': srcif}
+        route_key = (network, netmask)
+        
+        # Add the new packet to the list of packets for the route_key
+        if route_key in self.forwarding_table:
+            self.forwarding_table[route_key].append(new_packet)
         else:
-            # If it's a new route, add it directly
-            self.forwarding_table[route_key] = {'origin': origin,
-                                                'localpref': localpref,
-                                                'network': network,
-                                                'ASPath': ASPath,
-                                                'netmask': netmask,
-                                                'peer': srcif,
-                                                'selfOrigin': selfOrigin,
-                                                'next_hop': srcif}
+            self.forwarding_table[route_key] = [new_packet] 
             
         # Propagate the update to neighbors based on BGP policies
         self.propagate_update(srcif, message)
@@ -209,7 +233,7 @@ class Router:
                 # Otherwise log that we could not forward anywhere
                 else:
                     print("Did not send anywhere.")
-        
+    
     def process_route_withdrawal(self, packet):
         """Remove a route from the forwarding table.
         
@@ -218,19 +242,27 @@ class Router:
             dst: The destination network of the route being withdrawn.
         """
         for revocation in packet['msg']:
+            # If revocation is improperly formatted, ignore
+            expected_fields = ['network', 'netmask']
+            for expected_field in expected_fields:
+                if expected_field not in revocation:
+                    continue
+            
+            # Extract relevant fields
             network = revocation['network']
             netmask = revocation['netmask']
-            # print(f"Revoking route to {network}/{netmask}")
-            # print(f"Forwarding table before: {self.forwarding_table}")
-            # print(f"Updates before: {self.updates}")
+
             # Delete all entries in forward table with these attributes
-            deleted_routes = []
-            for key, route in self.forwarding_table.items():
-                if route['network'] == network and route['netmask'] == netmask:
-                    deleted_routes.append(key)
-              
-            # print(f"Deleted routes: {deleted_routes}")     
+            delete_candidates = [self.forwarding_table[(network, netmask)]]
+            routes_to_delete = []
+            
+            for candidate in delete_candidates:
+                if candidate['peer'] == packet['src']:
+                    routes_to_delete.append(candidate)
+                 
             # Process the route removal for each route
+            pprint(f"Routes to delete: {routes_to_delete}")
+            pprint(f"Table before withdraw: {self.forwarding_table}")
             for router_key in deleted_routes:
                 # If route does not exist in our table, ignore
                 if router_key not in self.forwarding_table:
@@ -238,23 +270,41 @@ class Router:
                 
                 # Otherwise, remove the route
                 del self.forwarding_table[router_key]
-                # print(f"Removed route {router_key} from forwarding table")
-                # print(f"Forwarding table after: {self.forwarding_table}")
+                pprint(f"Removed route {router_key} from forwarding table")
+                pprint(f"Forwarding table after: {self.forwarding_table}")
                 
                 # Remove any cached updates to this route
-                for update_json in self.updates:
-                    update_key = f"{update_json['msg']['network']}/{update_json['msg']['netmask']}/{update_json['msg']['ASPath'][-1]}"
-                    
-                    if update_key == router_key:
-                        self.updates.remove(update_json)
+                self.remove_corresponding_updates(network, netmask)
                         
         # print(f"Updates after finish: {self.updates}")
         
         # Rebuild the table
+        prev_table = self.forwarding_table.copy()
         self.rebuild_table(packet['src'])
+        print("="*80)
+        pprint(f"Previous Table: {prev_table}")
+        pprint(f"New Table: {self.forwarding_table}")
+        print("="*80)
+        # assert prev_table == self.forwarding_table, "Tables are not the same"
                         
         # Inform our neighbors of the withdrawal
         self.propagate_withdrawl(packet['src'], packet['msg'])
+       
+    def remove_corresponding_updates(self, network, netmask):
+        """Removes all updates from the cache that correspond to a given route.
+
+        Args:
+            network (str): The network of the route.
+            netmask (str): The netmask of the route.
+        """
+        # Removes all updates from the cache that correspond to a given route
+        for update in self.updates:
+            # If update is improperly formatted, ignore
+            if 'network' in update['msg'] and 'netmask' in update['msg']:
+                # Remove the update if it corresponds to the route
+                if update['msg']['network'] == network and update['msg']['netmask'] == netmask:
+                    pprint(f"Removing update: {update}")
+                    self.updates.remove(update)
             
     def propagate_withdrawl(self, srcif, revocation_list):     
         src_relationship = self.relations[srcif]
@@ -290,18 +340,27 @@ class Router:
         Args:
             srcif (str): The interface on which the update was received."""
         self.forwarding_table = {}
+        prev_updates = self.updates.copy()
+        self.updates = []
         
-        for update in self.updates:
-            self.process_route_update(srcif, update, False)
+        for update in prev_updates:
+            self.handle_incoming_message(srcif, json.dumps(update), False)
     
-    def process_data(self, src, dst, payload):
+    def process_data(self, message, log=True):
         """Process a data packet received from a neighbor.
 
         Args:
-            src (str): The source IP address of the data packet, indicating the neighbor router it came from.
-            dst (str): The destination IP address of the data packet.
-            payload (dict): The payload of the data packet.
+            message (dict): The message received from the neighbor.
         """
+        # Logs data packet
+        if log:
+            self.updates.append(message)
+            
+        # Extracts information
+        src = message['src']
+        dst = message['dst']
+        payload = message['msg']
+        
         # Attempt to find a route for the destination
         routes_found = []
         for route_details in self.forwarding_table.values():
@@ -358,13 +417,13 @@ class Router:
         # Construct the no route message
         no_route_message = json.dumps({
             'type': 'no route',
-            'src': self.asn,
+            'src': self.our_addr(dst),
             'dst': dst,
             'msg': f"No route to {dst}"
         })
         
         # Send the message back to the source
-        self.send(src, no_route_message)
+        self.send(self.our_addr(dst), no_route_message)
         
     def compare_routes(self, route1, route2):
         """Compare two routes based on specified criteria.
