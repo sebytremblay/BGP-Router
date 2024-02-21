@@ -49,14 +49,11 @@ class Router:
         return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
 
     def send(self, network, message):
-        """Sends a message to the specified network.
-        
-        Args:
-            network (str): The name of the network to which the message should be sent.
-            message (str): The message to send, which will be encoded as JSON.
-        """
+        if network not in self.sockets or network not in self.ports:
+            print(f"Error: Trying to send message to unknown network {network}")
+            return
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
-
+    
     def run(self):
         """Runs the router's main loop."""
         while True:
@@ -97,7 +94,7 @@ class Router:
         if message_type == 'update':
             self.process_route_update(srcif, json_message)
         elif message_type == 'withdraw':
-            self.process_route_withdrawal(json_message['src'], json_message['dst'])
+            self.process_route_withdrawal(json_message)
         elif message_type == 'data':
             self.process_data(json_message['src'], json_message['dst'], json_message['msg'])
         elif message_type == 'handshake':
@@ -119,7 +116,7 @@ class Router:
         # Acknowledge the handshake for logging or debugging purposes
         self.log_message(f"Handshake established with {src}.") 
 
-    def process_route_update(self, srcif, message):
+    def process_route_update(self, srcif, message, log=True):
         """Update the forwarding table based on a received route update.
 
         Args:
@@ -135,34 +132,45 @@ class Router:
         selfOrigin = message['msg']['selfOrigin']
 
         # Create a unique key for this route based on network and netmask
-        route_key = f"{network}/{netmask}"
+        route_key = f"{network}/{netmask}/{ASPath[-1]}"
 
         # Check if this is a new route or an update to an existing route
         if route_key in self.forwarding_table:
             # If it's an update, check if the new path is preferred based on your criteria
             # This is simplified; you'd typically compare AS path lengths, local pref, etc.
             existing_route = self.forwarding_table[route_key]
+            message['msg']['next_hop'] = srcif
             
-            if self.compareRoutes(existing_route, message['msg']) == 1:
-                self.forwarding_table[route_key] = {'network': network,
-                                                    'netmask': netmask,
+            if self.compare_routes(existing_route, message['msg']) == 1:
+                self.forwarding_table[route_key] = {'origin': origin,
                                                     'localpref': localpref,
+                                                    'network': network,
                                                     'ASPath': ASPath,
-                                                    'origin': origin,
+                                                    'netmask': netmask,
+                                                    'peer': srcif,
                                                     'selfOrigin': selfOrigin,
                                                     'next_hop': srcif}
         else:
             # If it's a new route, add it directly
-            self.forwarding_table[route_key] = {'network': network,
-                                                'netmask': netmask,
+            self.forwarding_table[route_key] = {'origin': origin,
                                                 'localpref': localpref,
+                                                'network': network,
                                                 'ASPath': ASPath,
-                                                'origin': origin,
+                                                'netmask': netmask,
+                                                'peer': srcif,
                                                 'selfOrigin': selfOrigin,
                                                 'next_hop': srcif}
             
         # Propagate the update to neighbors based on BGP policies
         self.propagate_update(srcif, message)
+        
+        # Aggregate routes if necessary
+        self.aggregate_routes()
+        
+        # Cache the update
+        if log:
+            self.updates.append(message)
+            print(f"Updates after append in process_route_update(): {self.updates}")
     
     def propagate_update(self, srcif, message):
         """Propagates a route update to neighbors based on BGP policies.
@@ -202,19 +210,89 @@ class Router:
                 else:
                     print("Did not send anywhere.")
         
-    def process_route_withdrawal(self, src, dst):
+    def process_route_withdrawal(self, packet):
         """Remove a route from the forwarding table.
         
         Args:
             src: The source of the withdrawal.
             dst: The destination network of the route being withdrawn.
         """
-        # Withdraw the route from the forwarding table
-        if dst in self.forwarding_table:
-            del self.forwarding_table[dst]
+        for revocation in packet['msg']:
+            network = revocation['network']
+            netmask = revocation['netmask']
+            # print(f"Revoking route to {network}/{netmask}")
+            # print(f"Forwarding table before: {self.forwarding_table}")
+            # print(f"Updates before: {self.updates}")
+            # Delete all entries in forward table with these attributes
+            deleted_routes = []
+            for key, route in self.forwarding_table.items():
+                if route['network'] == network and route['netmask'] == netmask:
+                    deleted_routes.append(key)
+              
+            # print(f"Deleted routes: {deleted_routes}")     
+            # Process the route removal for each route
+            for router_key in deleted_routes:
+                # If route does not exist in our table, ignore
+                if router_key not in self.forwarding_table:
+                    continue
+                
+                # Otherwise, remove the route
+                del self.forwarding_table[router_key]
+                # print(f"Removed route {router_key} from forwarding table")
+                # print(f"Forwarding table after: {self.forwarding_table}")
+                
+                # Remove any cached updates to this route
+                for update_json in self.updates:
+                    update_key = f"{update_json['msg']['network']}/{update_json['msg']['netmask']}/{update_json['msg']['ASPath'][-1]}"
+                    
+                    if update_key == router_key:
+                        self.updates.remove(update_json)
+                        
+        # print(f"Updates after finish: {self.updates}")
+        
+        # Rebuild the table
+        self.rebuild_table(packet['src'])
+                        
+        # Inform our neighbors of the withdrawal
+        self.propagate_withdrawl(packet['src'], packet['msg'])
             
-            # Drop the current forwarding table and request a new one from all neighbors
-            self.log_message(f"Route to {dst} withdrawn.")
+    def propagate_withdrawl(self, srcif, revocation_list):     
+        src_relationship = self.relations[srcif]
+
+        # Prepare the message to be sent to neighbors, excluding private fields
+        propagated_message = {
+            'type': 'withdraw',
+            'msg': revocation_list
+        }
+
+        # Determine which neighbors to send the update to
+        for neighbor, relation in self.relations.items():
+            if neighbor != srcif:  # Do not send the update back to the source
+                # Update neighbor specific messaging
+                propagated_message['src'] = self.our_addr(neighbor)
+                propagated_message['dst'] = neighbor
+                
+                # Rule 1: If update received from a customer, send to all other neighbors
+                if src_relationship == 'cust':
+                    self.send(neighbor, json.dumps(propagated_message))
+                    
+                # Rule 2: If update received from a peer or provider, only send to customers
+                elif src_relationship in ['peer', 'provider'] and relation == 'cust':
+                    self.send(neighbor, json.dumps(propagated_message))
+                
+                # Otherwise log that we could not forward anywhere
+                else:
+                    print("Did not send anywhere.")
+    
+    def rebuild_table(self, srcif):
+        """Deletes and rebuilds our forwarding table.
+        
+        Args:
+            srcif (str): The interface on which the update was received."""
+        self.forwarding_table = {}
+        
+        for update in self.updates:
+            self.process_route_update(srcif, update, False)
     
     def process_data(self, src, dst, payload):
         """Process a data packet received from a neighbor.
@@ -226,8 +304,9 @@ class Router:
         """
         # Attempt to find a route for the destination
         routes_found = []
-        for route_key, route_details in self.forwarding_table.items():
-            network, netmask = route_key.split('/')
+        for route_details in self.forwarding_table.values():
+            
+            network, netmask = route_details['network'], route_details['netmask']
             if self.ip_in_network(dst, network, netmask):
                 routes_found.append(route_details)
         
@@ -236,16 +315,20 @@ class Router:
             self.send_no_route_message(src, dst)
         
         # If only one route is found, forward the packet to the next hop
-        if len(routes_found) == 1:
-            next_hop = routes_found[0]['next_hop']
-            self.send(next_hop, json.dumps({'type': 'data', 'src': src, 'dst': dst, 'payload': payload}))
-        elif len(routes_found) > 1:
+        if len(routes_found) >= 1:
             best_route =  self.find_best_route(routes_found)
-            self.send(best_route['next_hop'], 
-                      json.dumps({'type': 'data', 
-                                  'src': src, 
-                                  'dst': dst, 
-                                  'payload': payload}))
+            next_hop = best_route['next_hop']
+            relationship = self.relations[next_hop]
+            
+            # Only send data to customers
+            if relationship == 'cust' or self.relations[src] == 'cust':
+                self.send(next_hop, 
+                        json.dumps({'type': 'data', 
+                                    'src': src, 
+                                    'dst': dst, 
+                                    'payload': payload}))
+            else:
+                print(f"Did not send data to {next_hop} because it is not a customer.")
 
     def ip_in_network(self, ip, network, netmask):
         """Check if an IP address is within a given network.
@@ -283,7 +366,7 @@ class Router:
         # Send the message back to the source
         self.send(src, no_route_message)
         
-    def compareRoutes(self, route1, route2):
+    def compare_routes(self, route1, route2):
         """Compare two routes based on specified criteria.
         
         Returns -1 if route1 is preferred, 1 if route2 is preferred, or 0 if they are equal.
@@ -335,7 +418,7 @@ class Router:
     def find_best_route(self, routes):
         """Find the best route based on the comparison function."""
         # Sort routes based on the comparison function
-        sorted_routes = sorted(routes, key=cmp_to_key(self.compareRoutes))
+        sorted_routes = sorted(routes, key=cmp_to_key(self.compare_routes))
         # Return the best route
         return sorted_routes[0]
     
@@ -364,12 +447,14 @@ class Router:
             table (dict): The forwarding table of the neighbor."""
         # Aggregate the routes in the forwarding table
         self.aggregate_routes()
+        
         # Convert the forwarding table to a list of routes
         table = list(self.forwarding_table.values())
         
         for route in table:
             # Convert the network and netmask to strings for serialization
             route['peer'] = route.pop('next_hop')
+            
         # Create a new "table" message with the aggregated routes
         table_message = {
             'src': self.our_addr(src),
@@ -378,18 +463,6 @@ class Router:
             'msg': table
         }
         self.send(src, json.dumps(table_message))
-
-    def announce_routes(self):
-        """
-        Announce routes to neighbors.
-        """
-        pass
-
-    def withdraw_route(self, dest):
-        """
-        Withdraw a previously announced route.
-        """
-        pass
 
     def ip_to_int(self, ip):
         """Converts an IP address from string format to an integer.
@@ -410,35 +483,46 @@ class Router:
         Returns:
             str: The string representation of the IP address."""
         return '.'.join(str((integer >> (8 * i)) & 0xFF) for i in reversed(range(4)))
-
+    
     def aggregate_routes(self):
-        """Aggregate numerically adjacent routes in the forwarding table that have the same next-hop
-        and identical attributes.
         """
-        # Sort routes based on network address (converted to integer for comparison)
-        routes = list(self.forwarding_table.values())
-        routes.sort(key=lambda x: self.ip_to_int(x['network']))
-        aggregated = False
+        Aggregate numerically adjacent routes in the forwarding table that have the same next-hop
+        and identical attributes. This method sorts the routes by their network address, checks for adjacency,
+        and aggregates routes where applicable. It repeats the process if any routes were aggregated to ensure
+        all possible aggregations are completed.
+        """
+        # Convert forwarding table to a list of (route_key, route_details) for easier manipulation
+        routes_list = sorted(self.forwarding_table.items(), key=lambda item: self.ip_to_int(item[1]['network']))
+
+        # Use index to iterate so we can modify the list while iterating
         i = 0
-        while i < len(self.forwarding_table) - 1:
-            route1 = routes[i]
-            route2 = routes[i + 1]
-            
-            # Check if routes are adjacent and have the same next-hop and attributes
-            if self.are_adjacent(route1, route2) and self.have_same_attributes(route1, route2):
-                # Aggregate routes
-                new_route = self.aggregate(route1, route2)
-                self.forwarding_table[i] = new_route
-                routes[i] = new_route
-                del self.forwarding_table[i + 1]
-                del routes[i + 1]
-                aggregated = True
+        while i < len(routes_list) - 1:
+            current_route_key, current_route = routes_list[i]
+            next_route_key, next_route = routes_list[i + 1]
+
+            # Check if current and next routes are adjacent and have the same attributes
+            if self.are_adjacent(current_route, next_route) and self.have_same_attributes(current_route, next_route):
+                # Perform aggregation
+                aggregated_route = self.aggregate(current_route, next_route)
+                print(f"Aggregated {current_route} and {next_route} into {aggregated_route}")
+                aggregated_route_key = f"{aggregated_route['network']}/{aggregated_route['netmask']}/{aggregated_route['ASPath'][-1]}"
+                
+                # Update forwarding table with the new aggregated route
+                self.forwarding_table[aggregated_route_key] = aggregated_route
+
+                # Remove the old routes from the forwarding table
+                del self.forwarding_table[current_route_key]
+                del self.forwarding_table[next_route_key]
+
+                # Mark that aggregation has been performed
+                aggregation_performed = True
+
+                # Restart the process from the beginning to ensure all possible aggregations are checked
+                break
+
             else:
+                # Move to the next pair if no aggregation is possible
                 i += 1
-        
-        # If any routes were aggregated, repeat the process in case further aggregation is possible
-        if aggregated:
-            self.aggregate_routes()
 
     def are_adjacent(self, route1, route2):
         """
@@ -502,12 +586,13 @@ class Router:
 
         # Return a new route with the aggregated network and netmask, and the same attributes
         return {
-            'network': new_network,
-            'netmask': new_netmask,
-            'localpref': route1['localpref'],
-            'selfOrigin': route1['selfOrigin'],
-            'ASPath': route1['ASPath'],
             'origin': route1['origin'],
+            'localpref': route1['localpref'],
+            'network': new_network,
+            'ASPath': route1['ASPath'],
+            'netmask': new_netmask,
+            'peer': route1['peer'],
+            'selfOrigin': route1['selfOrigin'],
         }
 
     def log_message(self, message):
