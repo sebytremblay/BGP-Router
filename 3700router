@@ -54,22 +54,6 @@ class Router:
             network (str): The name of the network to which the message should be sent.
             message (str): The message to send, which will be encoded as JSON.
         """
-        # if network not in self.sockets or network not in self.ports:
-        #     print(f"Error: Network {network} is not configured correctly.")
-        #     return
-        
-        # # Ensure the message is a string encoded in UTF-8 and serialized as JSON
-        # encoded_message = json.dumps(message).encode('utf-8')
-        
-        # # Retrieve the socket and port for the specified network
-        # sock = self.sockets[network]
-        # port = self.ports[network]
-        
-        # try:
-        #     # Send the encoded message to the 'localhost' at the specified port
-        #     sock.sendto(encoded_message, ('localhost', port))
-        # except Exception as e:
-        #     print(f"Failed to send message to network {network}: {e}")
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
     def run(self):
@@ -118,7 +102,7 @@ class Router:
         elif message_type == 'handshake':
             self.process_handshake(json_message['src'], json_message['dst'])
         elif message_type == 'dump':
-            self.process_dump(json_message['src'], json_message['table'])
+            self.process_dump(json_message['src'], json_message['msg'])
         elif message_type == 'table' or message_type == 'no route':
             raise NotImplementedError()
         else:
@@ -136,35 +120,46 @@ class Router:
 
     def process_route_update(self, srcif, message):
         """Update the forwarding table based on a received route update.
-        
+
         Args:
             srcif (str): The interface on which the update was received.
             message (dict): The route update message.
         """
-        # Extract route information from the message
-        src = message['src']
+        # Extract the relevant fields from the message
         network = message['msg']['network']
         netmask = message['msg']['netmask']
         localpref = message['msg']['localpref']
-        selfOrigin = message['msg']['selfOrigin']
         ASPath = message['msg']['ASPath']
         origin = message['msg']['origin']
-        
-        # Save the route to the cache
-        self.updates.append(message)
+        selfOrigin = message['msg']['selfOrigin']
 
-        # Add or update the route in the forwarding table
-        self.forwarding_table[src] = {
-            'network': network,
-            'netmask': netmask,
-            'localpref': localpref,
-            'selfOrigin': selfOrigin,
-            'ASPath': ASPath,
-            'origin': origin,
-            'next_hop': srcif
-        }
-        
-        # Possibly send updates to neighbors based on BGP policies
+        # Create a unique key for this route based on network and netmask
+        route_key = f"{network}/{netmask}"
+
+        # Check if this is a new route or an update to an existing route
+        if route_key in self.forwarding_table:
+            # If it's an update, check if the new path is preferred based on your criteria
+            # This is simplified; you'd typically compare AS path lengths, local pref, etc.
+            existing_route = self.forwarding_table[route_key]
+            if len(ASPath) < len(existing_route['ASPath']):
+                self.forwarding_table[route_key] = {'network': network,
+                                                    'netmask': netmask,
+                                                    'localpref': localpref,
+                                                    'ASPath': ASPath,
+                                                    'origin': origin,
+                                                    'selfOrigin': selfOrigin,
+                                                    'next_hop': srcif}
+        else:
+            # If it's a new route, add it directly
+            self.forwarding_table[route_key] = {'network': network,
+                                                'netmask': netmask,
+                                                'localpref': localpref,
+                                                'ASPath': ASPath,
+                                                'origin': origin,
+                                                'selfOrigin': selfOrigin,
+                                                'next_hop': srcif}
+            
+        # Propagate the update to neighbors based on BGP policies
         self.propagate_update(srcif, message)
     
     def propagate_update(self, srcif, message):
@@ -223,64 +218,73 @@ class Router:
         """Process a data packet received from a neighbor.
 
         Args:
-            src (str): The source of the data packet.
-            dst (str): The destination of the data packet.
-            payload (str): The payload of the data packet."""
-        # Convert destination IP to a format that matches your forwarding table keys
-        dst_network = dst
+            src (str): The source IP address of the data packet, indicating the neighbor router it came from.
+            dst (str): The destination IP address of the data packet.
+            payload (dict): The payload of the data packet.
+        """
+        # Attempt to find a route for the destination
+        routes_found = []
+        for route_key, route_details in self.forwarding_table.items():
+            network, netmask = route_key.split('/')
+            if self.ip_in_network(dst, network, netmask):
+                routes_found.append(route_details)
         
-        # Send a 'no route' message back to the source if no route exists
-        if dst_network not in self.forwarding_table:
-            print(f"Sockets: {self.sockets}")
-            print(f"Our Address: {self.our_addr(src)}")
+        # If no route is found, send a "no route" message back to the source
+        if len(routes_found) == 0:
+            self.send_no_route_message(src, dst)
+        
+        # If only one route is found, forward the packet to the next hop
+        if len(routes_found) == 1:
+            next_hop = routes_found[0]['next_hop']
+            self.send(next_hop, json.dumps({'type': 'data', 'src': src, 'dst': dst, 'payload': payload}))
+        elif len(routes_found) > 1:
+            # TODO
+            best_route =  self.find_best_route(routes_found)
             
-            print(f"Forwarding Table: {self.forwarding_table}")
-            
-            send_location = self.forwarding_table[self.our_addr(src)]['network']
-            print(f"Send location: {send_location}")
-            
-            self.send(send_location, json.dumps({'type': 'no route', 'src': self.our_addr(src), 'dst': dst}))
-            return
+
+    def ip_in_network(self, ip, network, netmask):
+        """Check if an IP address is within a given network.
+
+        Args:
+            ip (str): The IP address to check.
+            network (str): The network address.
+            netmask (str): The network mask.
+
+        Returns:
+            bool: True if ip is within the network defined by network and netmask, False otherwise.
+        """
+        # Convert IP, network, and netmask to integers for comparison
+        ip_int = self.ip_to_int(ip)
+        network_int = self.ip_to_int(network)
+        netmask_int = self.ip_to_int(netmask)
         
-        routes = self.forwarding_table[dst_network]
-        if len(routes) == 1:
-            # If there's exactly one route, use it
-            next_hop = routes[0]['next_hop']
-        else:
-            # If there are multiple routes, select the best one based on your criteria (e.g., shortest ASPath, highest localpref)
-            best_route = self.find_best_route(routes)
-            next_hop = best_route['next_hop']
+        return ip_int & netmask_int == network_int & netmask_int
+
+    def send_no_route_message(self, src, dst):
+        """Send a 'no route' message back to the source.
+
+        Args:
+            src (str): The source router IP or identifier from which the original message came.
+            dst (str): The original destination IP that could not be routed.
+        """
+        # Construct the no route message
+        no_route_message = json.dumps({
+            'type': 'no route',
+            'src': self.asn,
+            'dst': dst,
+            'msg': f"No route to {dst}"
+        })
         
-        # Forward the packet to the next hop
-        print(f"Forwarding packet to {next_hop}. Payload: {payload}")
-        print(f"Sockets Table: {self.sockets}")
-        # self.send(next_hop, json.dumps({'type': 'data', 'src': self.our_addr(src), 'dst': dst, 'payload': payload}))
+        # Send the message back to the source
+        self.send(src, no_route_message)
         
-    def find_best_route(self, src, dst):
+    def find_best_route(self, routes):
         """Find the best route to the destination in the forwarding table.
 
         Args:
-            src (_type_): _description_
-            dst (_type_): _description_
+            routes (list): A list of routes to the destination.
         """
-        # Finds all possible routes
-        possible_routes = []
-        for network in self.forwarding_table.keys():
-            if network == dst:
-                possible_routes.append(network)
-                
-        # Chooses the longest prefix match
-        longest_prefix_route = None
-        longest_prefix = 0
-        
-        for route in possible_routes:
-            route_port = self.ports[route] 
-            
-            if len(route_port) > longest_prefix:
-                longest_prefix = len(route_port)
-                longest_prefix_route = route
-                
-        return longest_prefix_route
+        pass
     
     def send_to_route(self, port_num, payload):
         """Send a data packet to the specified route in the forwarding table.
