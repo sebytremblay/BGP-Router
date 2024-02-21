@@ -241,6 +241,7 @@ class Router:
             # TODO
             best_route =  self.find_best_route(routes_found)
             
+            
 
     def ip_in_network(self, ip, network, netmask):
         """Check if an IP address is within a given network.
@@ -284,7 +285,27 @@ class Router:
         Args:
             routes (list): A list of routes to the destination.
         """
-        pass
+        # Sort routes by netmask length (longest prefix first)
+        routes.sort(key=lambda route: self.ip_to_int(route['netmask']), reverse=True)
+
+        # Then sort by localpref (highest first)
+        routes.sort(key=lambda route: route['localpref'], reverse=True)
+
+        # Then sort by selfOrigin (true first)
+        routes.sort(key=lambda route: route['selfOrigin'], reverse=True)
+
+        # Then sort by ASPath length (shortest first)
+        routes.sort(key=lambda route: len(route['ASPath']))
+
+        # Then sort by origin (IGP > EGP > UNK)
+        origin_order = {'IGP': 0, 'EGP': 1, 'UNK': 2}
+        routes.sort(key=lambda route: origin_order[route['origin']])
+
+        # Finally, sort by neighbor IP (lowest first)
+        routes.sort(key=lambda route: self.ip_to_int(route['next_hop']))
+
+        # The best route is the first one in the sorted list
+        return routes[0]
     
     def send_to_route(self, port_num, payload):
         """Send a data packet to the specified route in the forwarding table.
@@ -303,31 +324,28 @@ class Router:
         # Send the message the netwrok
         self.send(found_neighbor, payload)
     
-    def send_no_route_message(self, src, dst):
-        """Informs the source that no route to the destination exists.
-        
-        Args:
-            src (str): The source of the message.
-            dst (str): The destination of the message.
-        """
-        # Create the message
-        message = {
-            'src': self.our_addr(src),
-            'dst': src,
-            'type': 'no route',
-            'msg': {}
-        }
-        
-        # Send the message to the source
-        self.send(src, json.dumps(message)) 
-        
     def process_dump(self, src, table):
         """Process a dump of the neighbor's forwarding table.
 
         Args:
             src (str): The source of the dump.
             table (dict): The forwarding table of the neighbor."""
-        pass
+        # Aggregate the routes in the forwarding table
+        self.aggregate_routes()
+        # Convert the forwarding table to a list of routes
+        table = list(self.forwarding_table.values())
+        
+        for route in table:
+            # Convert the network and netmask to strings for serialization
+            route['peer'] = route.pop('next_hop')
+        # Create a new "table" message with the aggregated routes
+        table_message = {
+            'src': self.our_addr(src),
+            'dst': src,
+            'type': 'table',
+            'msg': table
+        }
+        self.send(src, json.dumps(table_message))
 
     def announce_routes(self):
         """
@@ -366,20 +384,22 @@ class Router:
         and identical attributes.
         """
         # Sort routes based on network address (converted to integer for comparison)
-        self.forwarding_table.sort(key=lambda x: self.ip_to_int(x['network']))
+        routes = list(self.forwarding_table.values())
+        routes.sort(key=lambda x: self.ip_to_int(x['network']))
         aggregated = False
-        
         i = 0
         while i < len(self.forwarding_table) - 1:
-            route1 = self.forwarding_table[i]
-            route2 = self.forwarding_table[i + 1]
+            route1 = routes[i]
+            route2 = routes[i + 1]
             
             # Check if routes are adjacent and have the same next-hop and attributes
             if self.are_adjacent(route1, route2) and self.have_same_attributes(route1, route2):
                 # Aggregate routes
                 new_route = self.aggregate(route1, route2)
                 self.forwarding_table[i] = new_route
+                routes[i] = new_route
                 del self.forwarding_table[i + 1]
+                del routes[i + 1]
                 aggregated = True
             else:
                 i += 1
@@ -423,7 +443,7 @@ class Router:
             bool: Whether the routes have the same attributes."""
         return route1['localpref'] == route2['localpref'] \
             and route1['origin'] == route2['origin'] \
-            and route1['ASpth'] == route2['ASpth'] \
+            and route1['ASPath'] == route2['ASPath'] \
             and route1['selfOrigin'] == route2['selfOrigin'] \
 
     def aggregate(self, route1, route2):
@@ -455,7 +475,7 @@ class Router:
             'netmask': new_netmask,
             'localpref': route1['localpref'],
             'selfOrigin': route1['selfOrigin'],
-            'ASpth': route1['ASpth'],
+            'ASPath': route1['ASPath'],
             'origin': route1['origin'],
         }
 
