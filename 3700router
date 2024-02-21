@@ -381,6 +381,11 @@ class Router:
                                     'src': src, 
                                     'dst': dst, 
                                     'payload': payload}))
+            else:
+                print(f"Did not send data to {next_hop} because it is not a customer.")
+                # If your router drops a data message due to these restrictions, it 
+                # should send a “no route” message back to the source.
+                self.send_no_route_message(src, dst)
             
             # # Only send data to customers
             # if relationship == 'cust' or self.relations[src] == 'cust':
