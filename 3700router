@@ -375,16 +375,45 @@ class Router:
             next_hop = best_route['next_hop']
             relationship = self.relations[next_hop]
             
-            # Only send data to customers
-            if relationship == 'cust' or self.relations[src] == 'cust':
-                self.send(next_hop, 
-                        json.dumps({'type': 'data', 
+            if self.is_transaction_profitable(relationship, self.relations[src]) == True:
+                self.send(next_hop,
+                          json.dumps({'type': 'data', 
                                     'src': src, 
                                     'dst': dst, 
                                     'payload': payload}))
-            else:
-                print(f"Did not send data to {next_hop} because it is not a customer.")
-
+            
+            # # Only send data to customers
+            # if relationship == 'cust' or self.relations[src] == 'cust':
+            #     self.send(next_hop, 
+            #             json.dumps({'type': 'data', 
+            #                         'src': src, 
+            #                         'dst': dst, 
+            #                         'payload': payload}))
+            # else:
+                # print(f"Did not send data to {next_hop} because it is not a customer.")
+                
+    def is_transaction_profitable(self, relationship, self_relation_src):
+        """Evaluates the protocol rules to determine if a message should be sent to a neighbor,
+        assuming that an entry was found in the forwarding table.
+        
+        Args:
+            src (str): The source of the message.
+            dst (str): The destination of the message.
+            
+        Returns:
+            bool: True if the transaction is profitable, False otherwise.
+        """
+        # If the source or destination is a customer, transaction is profitable; send data
+        if relationship == 'cust' or self_relation_src == 'cust':
+            return True
+        
+        # If the source router is a peer or provider, and the destination is a peer or provider,
+        # then the transaction is not profitable; drop the message
+        if ((relationship == 'peer' or relationship == 'provider') and 
+            (self_relation_src == 'peer' or self_relation_src == 'provider')):
+                return False
+        return AssertionError
+    
     def ip_in_network(self, ip, network, netmask):
         """Check if an IP address is within a given network.
 
