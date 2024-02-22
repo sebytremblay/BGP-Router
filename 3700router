@@ -232,23 +232,6 @@ class Router:
                     self.send(neighbor, json.dumps(propagated_message))
                 else:
                     print(f"Transaction not profitable: {relation} -> {self.relations[srcif]}")
-                    
-    def process_route_withdrawall(self, packet):
-        """Remove routes from the updates cache that correspond to the withdrawn route and rebuild the forwarding table."""
-        withdrawn_routes = packet['msg']  # Assuming this contains details of the routes to withdraw
-
-        # Step 1: Update the self.updates list to remove the withdrawn routes
-        for revocation in withdrawn_routes:
-            network = revocation['network']
-            netmask = revocation['netmask']
-
-            # Remove updates corresponding to the withdrawn route
-            self.updates = [update for update in self.updates if not (
-                update['msg'].get('network') == network and update['msg'].get('netmask') == netmask
-            )]
-
-        # Step 2: Rebuild the forwarding_table from the updated self.updates list
-        self.rebuild_table()
     
     def process_route_withdrawal(self, packet):
         """Remove a route from the forwarding table.
@@ -293,7 +276,7 @@ class Router:
         
         # # Rebuild the table
         # prev_table = self.forwarding_table.copy()
-        self.rebuild_table()
+        # self.rebuild_table()
         # print("="*80)
         # pprint(f"Previous Table: {prev_table}")
         # pprint(f"New Table: {self.forwarding_table}")
@@ -581,118 +564,76 @@ class Router:
             str: The string representation of the IP address."""
         return '.'.join(str((integer >> (8 * i)) & 0xFF) for i in reversed(range(4)))
     
+    def cidr_to_netmask(self, prefix_length):
+        """Converts a CIDR prefix length to a netmask."""
+        return self.int_to_ip((0xffffffff >> (32 - prefix_length)) << (32 - prefix_length))
+
+    def netmask_to_cidr(self, netmask):
+        """Converts a netmask to its CIDR prefix length."""
+        return bin(self.ip_to_int(netmask)).count('1')
+
+    def aggregate(self, route1, route2):
+        """Aggregate two adjacent routes into one with a broader netmask."""
+        prefix_length = self.netmask_to_cidr(route1['netmask'])
+        new_prefix_length = prefix_length - 1
+        new_netmask = self.cidr_to_netmask(new_prefix_length)
+        new_network_int = self.ip_to_int(route1['network']) & self.ip_to_int(new_netmask)
+        new_network = self.int_to_ip(new_network_int)
+        
+        pprint(f"Aggregated {route1['network']}/{route1['netmask']} and {route2['network']}/{route2['netmask']} into {new_network}/{new_netmask}")
+
+        return new_network, new_netmask
+
+    def can_aggregate(self, route1, route2):
+        """Check if two routes can be aggregated."""
+        if not self.have_same_attributes(route1, route2):
+            return False
+
+        prefix_length = self.netmask_to_cidr(route1['netmask'])
+        if self.ip_to_int(route1['network']) >> prefix_length != self.ip_to_int(route2['network']) >> prefix_length:
+            return False
+
+        return self.are_adjacent(route1, route2)
+
+    def are_adjacent(self, route1, route2):
+        """Check if two networks are adjacent."""
+        network1 = self.ip_to_int(route1['network'])
+        netmask1 = self.ip_to_int(route1['netmask'])
+        network2 = self.ip_to_int(route2['network'])
+
+        broadcast1 = network1 | (~netmask1 & 0xFFFFFFFF)
+        return network2 == broadcast1 + 1
+
+    def have_same_attributes(self, route1, route2):
+        """Check if two routes have the same attributes."""
+        attributes_to_compare = ['localpref', 'origin', 'ASPath', 'peer', 'selfOrigin']
+        return all(route1[attr] == route2[attr] for attr in attributes_to_compare)
+
     def aggregate_routes(self):
-        # Step 1: Prepare a list of all routes, sorted by network address
-        all_routes = []
-        for routes in self.forwarding_table.values():
-            all_routes.extend(routes)
+        """Aggregate routes based on CIDR notations."""
+        all_routes = [route for routes in self.forwarding_table.values() for route in routes]
         all_routes.sort(key=lambda x: self.ip_to_int(x['network']))
 
-        # Step 2-5: Try to aggregate routes
         aggregated = True
         while aggregated:
             aggregated = False
             i = 0
             while i < len(all_routes) - 1:
-                route1 = all_routes[i]
-                route2 = all_routes[i + 1]
-
-                if self.can_aggregate(route1, route2):
-                    # Routes can be aggregated
-                    new_network, new_netmask = self.aggregate(route1, route2)
-                    new_route = copy.deepcopy(route1)  # Copy attributes from one of the routes
+                if self.can_aggregate(all_routes[i], all_routes[i + 1]):
+                    new_network, new_netmask = self.aggregate(all_routes[i], all_routes[i + 1])
+                    new_route = copy.deepcopy(all_routes[i])
                     new_route['network'] = new_network
                     new_route['netmask'] = new_netmask
-                    
-                    # Replace the two routes with the new, aggregated route
-                    all_routes.pop(i)
-                    all_routes.pop(i)
-                    all_routes.insert(i, new_route)
+                    all_routes[i:i + 2] = [new_route]  # Replace the two routes with the aggregated one
                     aggregated = True
                 else:
                     i += 1
 
-        # Step 6: Update the forwarding table with aggregated routes
-        self.forwarding_table = {}
+        # Update the forwarding table with aggregated routes
+        self.forwarding_table.clear()
         for route in all_routes:
             key = (route['network'], route['netmask'])
-            if key in self.forwarding_table:
-                self.forwarding_table[key].append(route)
-            else:
-                self.forwarding_table[key] = [route]
-                
-    def can_aggregate(self, route1, route2):
-        # Check if two routes are adjacent and have identical attributes (simplified version)
-        if not self.have_same_attributes(route1, route2):
-            return False
-
-        network1 = self.ip_to_int(route1['network'])
-        netmask1 = self.ip_to_int(route1['netmask'])
-        network2 = self.ip_to_int(route2['network'])
-        netmask2 = self.ip_to_int(route2['netmask'])
-
-        # Ensure netmasks are the same and check adjacency
-        if netmask1 != netmask2 or not self.are_adjacent(network1, netmask1, network2, netmask2):
-            return False
-
-        return True
-
-    def are_adjacent(self, network1, netmask1, network2, netmask2):
-        """
-        Determine if two routes are numerically adjacent.
-        
-        Args:
-            route1 (dict): The first route, with 'network' and 'netmask' keys.
-            route2 (dict): The second route, with 'network' and 'netmask' keys.
-            
-        Returns:
-            bool: True if route1 and route2 are adjacent, False otherwise.
-        """
-        # Calculate the broadcast address of the first network
-        broadcast1 = network1 | (~netmask1 & 0xFFFFFFFF)
-
-        # The second network is adjacent if its network address is one more than the broadcast address of the first
-        return network2 == broadcast1 + 1
-
-    def have_same_attributes(self, route1, route2):
-        """Check if two routes have the same attributes.
-        
-        Args:
-            route1 (dict): The first route to compare.
-            route2 (dict): The second route to compare.
-            
-        Returns:
-            bool: Whether the routes have the same attributes."""
-        return route1['localpref'] == route2['localpref'] \
-            and route1['origin'] == route2['origin'] \
-            and route1['ASPath'] == route2['ASPath'] \
-            and route1['selfOrigin'] == route2['selfOrigin'] \
-
-    def aggregate(self, route1, route2):
-        """
-        Aggregate two adjacent routes into one. Assumes that the routes are adjacent
-        and have the same netmask, next-hop, and other relevant attributes.
-
-        Args:
-            route1 (dict): The first route to aggregate.
-            route2 (dict): The second route to aggregate.
-
-        Returns:
-            string: The new network address.
-            string: The new network mask.
-        """
-        # Convert netmask to integer for comparison and calculation
-        netmask_int = self.ip_to_int(route1['netmask'])
-        
-        # Calculate the new netmask by subtracting one from the binary representation's length
-        new_netmask_int = (netmask_int << 1) & 0xFFFFFFFF
-        new_netmask = self.int_to_ip(new_netmask_int)
-        
-        # The new network is the lower of the two original networks under the new netmask
-        new_network_int = self.ip_to_int(route1['network']) & new_netmask_int
-        new_network = self.int_to_ip(new_network_int)
-
-        return new_network, new_netmask
+            self.forwarding_table[key] = self.forwarding_table.get(key, []) + [route]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='route packets')
