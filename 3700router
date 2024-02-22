@@ -198,7 +198,7 @@ class Router:
         
         # Cache the update
         if log:
-            self.updates.append(message)
+            self.updates.append((srcif, message))
             print(f"Updates after append in process_route_update(): {self.updates}")
     
     def propagate_update(self, srcif, message):
@@ -274,13 +274,13 @@ class Router:
                         
         # print(f"Updates after finish: {self.updates}")
         
-        # # Rebuild the table
-        # prev_table = self.forwarding_table.copy()
+        # Rebuild the table
+        prev_table = self.forwarding_table.copy()
         # self.rebuild_table()
-        # print("="*80)
-        # pprint(f"Previous Table: {prev_table}")
-        # pprint(f"New Table: {self.forwarding_table}")
-        # print("="*80)
+        print("="*80)
+        pprint(f"Previous Table: {prev_table}")
+        pprint(f"New Table: {self.forwarding_table}")
+        print("="*80)
         # # assert prev_table == self.forwarding_table, "Tables are not the same"
                         
         # Inform our neighbors of the withdrawal
@@ -296,16 +296,19 @@ class Router:
         # Removes all updates from the cache that correspond to a given route
         prev_updates = self.updates.copy()
         
-        for update in self.updates:
+        for update_pair in self.updates:
+            srcif = update_pair[0]
+            update = update_pair[1]
+            
             # If update is improperly formatted, ignore
             if 'network' in update['msg'] and 'netmask' in update['msg']:
                 # Remove the update if it corresponds to the route
-                if update['msg']['network'] == network and update['msg']['netmask'] == netmask and update['src'] == src:
+                if update['msg']['network'] == network and update['msg']['netmask'] == netmask and srcif == src:
                     # pprint(f"Removing update: {update}")
-                    self.updates.remove(update)
+                    self.updates.remove((srcif, update))
                     
-        pprint(f"Previous updates: {prev_updates} with length: {len(prev_updates)}")
-        pprint(f"Current updates: {self.updates} with length: {len(self.updates)}")
+        # pprint(f"Previous updates: {prev_updates} with length: {len(prev_updates)}")
+        # pprint(f"Current updates: {self.updates} with length: {len(self.updates)}")
             
     def propagate_withdrawl(self, srcif, revocation_list):     
         # Prepare the message to be sent to neighbors, excluding private fields
@@ -336,29 +339,30 @@ class Router:
         prev_updates = self.updates.copy()
         self.updates = []
         
-        pprint(f"Rebuilding table from updates: {prev_updates}")
+        # pprint(f"Rebuilding table from updates: {prev_updates}")
         self.relations = self.default_relations.copy()
-        # self.ports = self.default_ports.copy()
-        # self.sockets = self.default_sockets.copy()
+        self.ports = self.default_ports.copy()
+        self.sockets = self.default_sockets.copy()
         
-        for update in prev_updates:
-            srcif = update['src']
-            self.handle_incoming_message(srcif, json.dumps(update), False)
+        for update_pair in prev_updates:
+            srcif = update_pair[0]
+            update = update_pair[1]
+            self.handle_incoming_message(srcif, json.dumps(update), True)
     
     def process_data(self, message, log=True):
         """Process a data packet received from a neighbor.
 
         Args:
             message (dict): The message received from the neighbor.
-        """
-        # Logs data packet
-        if log:
-            self.updates.append(message)
-            
+        """            
         # Extracts information
         src = message['src']
         dst = message['dst']
         payload = message['msg']
+        
+        # Logs data packet
+        if log:
+            self.updates.append((src, message))
         
         # Attempt to find a route for the destination
         routes_found = []
