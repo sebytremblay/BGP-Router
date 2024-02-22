@@ -580,29 +580,33 @@ class Router:
         new_network_int = self.ip_to_int(route1['network']) & self.ip_to_int(new_netmask)
         new_network = self.int_to_ip(new_network_int)
         
-        pprint(f"Aggregated {route1['network']}/{route1['netmask']} and {route2['network']}/{route2['netmask']} into {new_network}/{new_netmask}")
+        pprint(f"Aggregated {route1['network']}/{route1['netmask']} and {route2['network']}{route2['netmask']} into {new_network}/{new_netmask}")
 
         return new_network, new_netmask
+    
+    def are_adjacent(self, route1, route2):
+        """Check if two networks are adjacent and suitable for aggregation."""
+        network1 = self.ip_to_int(route1['network'])
+        network2 = self.ip_to_int(route2['network'])
+        netmask1 = self.ip_to_int(route1['netmask'])
+
+        # Calculate the size of the network from the netmask
+        network_size = 1 << (32 - self.netmask_to_cidr(route1['netmask']))
+
+        # Check if the networks are adjacent by their numerical difference
+        return abs(network2 - network1) == network_size
 
     def can_aggregate(self, route1, route2):
         """Check if two routes can be aggregated."""
         if not self.have_same_attributes(route1, route2):
             return False
 
-        prefix_length = self.netmask_to_cidr(route1['netmask'])
-        if self.ip_to_int(route1['network']) >> prefix_length != self.ip_to_int(route2['network']) >> prefix_length:
+        # Ensure both routes have the same netmask and are adjacent
+        if route1['netmask'] != route2['netmask']:
             return False
 
         return self.are_adjacent(route1, route2)
 
-    def are_adjacent(self, route1, route2):
-        """Check if two networks are adjacent."""
-        network1 = self.ip_to_int(route1['network'])
-        netmask1 = self.ip_to_int(route1['netmask'])
-        network2 = self.ip_to_int(route2['network'])
-
-        broadcast1 = network1 | (~netmask1 & 0xFFFFFFFF)
-        return network2 == broadcast1 + 1
 
     def have_same_attributes(self, route1, route2):
         """Check if two routes have the same attributes."""
