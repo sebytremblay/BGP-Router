@@ -3,6 +3,7 @@
 import argparse, socket, time, json, select, struct, sys, math
 from pprint import pprint
 from functools import cmp_to_key
+# import sort
 import copy
 
 class Router:
@@ -581,37 +582,60 @@ class Router:
         all possible aggregations are completed.
         """
         return
-        # Convert forwarding table to a list of (route_key, route_details) for easier manipulation
-        routes_list = sorted(self.forwarding_table.items(), key=lambda item: self.ip_to_int(item[1]['network']))
+        # # Convert forwarding table to a list of (route_key, route_details) for easier manipulation
+        # routes_list = sorted(self.forwarding_table.items(), key=lambda item: self.ip_to_int(item[1]['network']))
 
-        # Use index to iterate so we can modify the list while iterating
-        i = 0
-        while i < len(routes_list) - 1:
-            current_route_key, current_route = routes_list[i]
-            next_route_key, next_route = routes_list[i + 1]
+        # # Use index to iterate so we can modify the list while iterating
+        # i = 0
+        # while i < len(routes_list) - 1:
+        #     current_route_key, current_route = routes_list[i]
+        #     next_route_key, next_route = routes_list[i + 1]
 
-            # Check if current and next routes are adjacent and have the same attributes
-            if self.are_adjacent(current_route, next_route) and self.have_same_attributes(current_route, next_route):
-                # Perform aggregation
-                aggregated_route = self.aggregate(current_route, next_route)
-                print(f"Aggregated {current_route} and {next_route} into {aggregated_route}")
-                aggregated_route_key = f"{aggregated_route['network']}/{aggregated_route['netmask']}/{aggregated_route['ASPath'][-1]}"
+        #     # Check if current and next routes are adjacent and have the same attributes
+        #     if self.are_adjacent(current_route, next_route) and self.have_same_attributes(current_route, next_route):
+        #         # Perform aggregation
+        #         aggregated_route = self.aggregate(current_route, next_route)
+        #         print(f"Aggregated {current_route} and {next_route} into {aggregated_route}")
+        #         aggregated_route_key = f"{aggregated_route['network']}/{aggregated_route['netmask']}/{aggregated_route['ASPath'][-1]}"
                 
-                # Update forwarding table with the new aggregated route
-                self.forwarding_table[aggregated_route_key] = aggregated_route
+        #         # Update forwarding table with the new aggregated route
+        #         self.forwarding_table[aggregated_route_key] = aggregated_route
 
-                # Remove the old routes from the forwarding table
-                del self.forwarding_table[current_route_key]
-                del self.forwarding_table[next_route_key]
+        #         # Remove the old routes from the forwarding table
+        #         del self.forwarding_table[current_route_key]
+        #         del self.forwarding_table[next_route_key]
 
-                # Mark that aggregation has been performed
-                aggregation_performed = True
+        #         # Mark that aggregation has been performed
+        #         aggregation_performed = True
 
-                # Restart the process from the beginning to ensure all possible aggregations are checked
-                break
+        #         # Restart the process from the beginning to ensure all possible aggregations are checked
+        #         break
 
+        #     else:
+        #         # Move to the next pair if no aggregation is possible
+        #         i += 1
+        
+        # Sort the forwarding table by IP address
+        # self.forwarding_table.sort(key=lambda entry: self.ip_to_int(entry['ip']))
+
+        i = 0
+        while i < len(self.forwarding_table) - 1:
+            entry1 = self.forwarding_table[i]
+            entry2 = self.forwarding_table[i + 1]
+
+            # Check if the entries are adjacent, have the same next-hop, and have the same attributes
+            if self.are_adjacent(entry1['ip'], entry2['ip']) and entry1['next_hop'] == entry2['next_hop'] and entry1['attributes'] == entry2['attributes']:
+                # Combine the entries into a single entry
+                combined_entry = {
+                    'ip': self.combine_ips(entry1['ip'], entry2['ip']),
+                    'next_hop': entry1['next_hop'],
+                    'attributes': entry1['attributes']
+                }
+
+                # Replace the old entries with the new one
+                self.forwarding_table[i] = combined_entry
+                del self.forwarding_table[i + 1]
             else:
-                # Move to the next pair if no aggregation is possible
                 i += 1
 
     def are_adjacent(self, route1, route2):
