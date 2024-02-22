@@ -194,19 +194,21 @@ class Router:
         #     self.ports[network] = self.ports[srcif]
         #     pprint(f"Updated Relations: {self.relations}")
         
-        pprint(f"Current Relations: {self.relations}")
+        # pprint(f"Current Relations: {self.relations}")
         # Find similar relations if they already exists
         for relation in self.relations:
             if self.ip_in_network(relation, network, netmask):
-                self.sockets[network] = self.sockets[relation]
-                # self.relations[network] = self.relations[relation]
-                # self.ports[network] = self.ports[relation]
+                print(f"Found similar relation: {relation}")
+                self.sockets[network] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.relations[network] = self.relations[relation]
+                self.ports[network] = self.ports[relation]
+                break
                 
         # Otherwise create new entry
         if network not in self.relations:
             self.relations[network] = self.relations[srcif]
-            # self.ports[network] = self.ports[srcif]
-            # self.sockets[network] = self.socket[srcif]
+            self.ports[network] = self.ports[srcif]
+            self.sockets[network] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             
         # Propagate the update to neighbors based on BGP policies
         self.propagate_update(srcif, message)
@@ -273,16 +275,16 @@ class Router:
             delete_candidates = self.forwarding_table[(network, netmask)]
             routes_to_delete = []
             
-            pprint(f"Delete candidates: {delete_candidates}")
-            pprint(f"Table before withdraw: {self.forwarding_table}")
+            # pprint(f"Delete candidates: {delete_candidates}")
+            # pprint(f"Table before withdraw: {self.forwarding_table}")
             
             for candidate in delete_candidates:
                 if candidate['peer'] == packet['src']:
                     routes_to_delete.append(candidate)
                  
             # Process the route removal for each route
-            pprint(f"Routes to delete: {routes_to_delete}")
-            pprint(f"Table before withdraw: {self.forwarding_table}")
+            # pprint(f"Routes to delete: {routes_to_delete}")
+            # pprint(f"Table before withdraw: {self.forwarding_table}")
             
             # Remove the route from the forwarding table
             self.forwarding_table[(network, netmask)] = [route for route in delete_candidates if route not in routes_to_delete]
@@ -295,10 +297,10 @@ class Router:
         # Rebuild the table
         prev_table = self.forwarding_table.copy()
         # self.rebuild_table(packet['src'])
-        print("="*80)
-        pprint(f"Previous Table: {prev_table}")
-        pprint(f"New Table: {self.forwarding_table}")
-        print("="*80)
+        # print("="*80)
+        # pprint(f"Previous Table: {prev_table}")
+        # pprint(f"New Table: {self.forwarding_table}")
+        # print("="*80)
         # assert prev_table == self.forwarding_table, "Tables are not the same"
                         
         # Inform our neighbors of the withdrawal
@@ -321,8 +323,6 @@ class Router:
                     self.updates.remove(update)
             
     def propagate_withdrawl(self, srcif, revocation_list):     
-        src_relationship = self.relations[srcif]
-
         # Prepare the message to be sent to neighbors, excluding private fields
         propagated_message = {
             'type': 'withdraw',
@@ -336,17 +336,11 @@ class Router:
                 propagated_message['src'] = self.our_addr(neighbor)
                 propagated_message['dst'] = neighbor
                 
-                # Rule 1: If update received from a customer, send to all other neighbors
-                if src_relationship == 'cust':
+                # Send the update to the neighbor if needed
+                if self.is_transaction_profitable(relation, self.relations[srcif]):
                     self.send(neighbor, json.dumps(propagated_message))
-                    
-                # Rule 2: If update received from a peer or provider, only send to customers
-                elif src_relationship in ['peer', 'provider'] and relation == 'cust':
-                    self.send(neighbor, json.dumps(propagated_message))
-                
-                # Otherwise log that we could not forward anywhere
                 else:
-                    print("Did not send anywhere.") 
+                    print(f"Transaction not profitable: {relation} -> {self.relations[srcif]}")
     
     def rebuild_table(self, srcif):
         """Deletes and rebuilds our forwarding table.
@@ -375,24 +369,15 @@ class Router:
         dst = message['dst']
         payload = message['msg']
         
-        # If we have not seen this packet's relationhip, add it to the relations
-        # pprint(f"Current relations: {self.relations}")
-        # if dst not in self.relations:
-        #     print(f"Default Src: {src}")
-        #     print(f"Modified Src: {self.our_addr(src)}")
-            
-        #     self.relations[dst] = self.relations[self.our_addr(src)]
-        #     pprint(f"Updated relations: {self.relations}")
-                # Find all existing relations that this destination is in the same network of
-        
         # Attempt to find a route for the destination
         routes_found = []
+        # pprint(f"Forwarding Table: {self.forwarding_table}")
         for network, netmask in self.forwarding_table.keys():
             if self.ip_in_network(dst, network, netmask):
                 for route in self.forwarding_table[(network, netmask)]:
                     self.relations[dst] = self.relations[network]
-                    # self.sockets[dst] = self.sockets[network]
-                    # self.ports[dst] = self.ports[network]
+                    self.sockets[dst] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    self.ports[dst] = self.ports[network]
                     routes_found.append(route)
         
         # If no route is found, send a "no route" message back to the source
@@ -401,8 +386,10 @@ class Router:
         
         # If only one route is found, forward the packet to the next hop
         pprint(f"Relationships: {self.relations}")
+        pprint(f"Routes Found: {routes_found}")
         if len(routes_found) >= 1:
             best_route =  self.find_best_route(routes_found)
+            pprint(f"Best Route: {best_route}")
             next_hop = best_route['next_hop']
             dst_relationship = self.relations[next_hop]
             src_relationship = self.relations.get(src, '')
@@ -521,10 +508,13 @@ class Router:
         Returns:
             int: The prefix length (number of leading 1 bits in the netmask).
         """
-        # Convert the netmask from dotted decimal notation to a binary string
-        netmask_bin = ''.join(format(int(octet), '08b') for octet in netmask.split('.'))
-        # Count the number of leading 1s in the binary representation
-        prefix_length = netmask_bin.count('1')
+        # Convert the netmask to an integer
+        netmask_int = self.ip_to_int(netmask)
+        
+        # Count the number of leading 1 bits
+        prefix_length = 0
+        while netmask_int & (1 << (31 - prefix_length)):
+            prefix_length += 1
         
         return prefix_length
         
@@ -534,23 +524,6 @@ class Router:
         sorted_routes = sorted(routes, key=cmp_to_key(self.compare_routes))
         # Return the best route
         return sorted_routes[0]
-    
-    def send_to_route(self, port_num, payload):
-        """Send a data packet to the specified route in the forwarding table.
-
-        Args:
-            port_num (_type_): _description_
-            payload (_type_): _description_
-        """
-        # Find the corresponding network in the forwarding table
-        found_neighbor = ''
-        for neighbor, port in self.ports.items():
-            if port == port_num:
-                found_neighbor = neighbor
-                break
-        
-        # Send the message the netwrok
-        self.send(found_neighbor, payload)
     
     def process_dump(self, src, table):
         """Process a dump of the neighbor's forwarding table.
@@ -565,7 +538,7 @@ class Router:
         table = []
         for route_list in self.forwarding_table.values():
             for route in route_list:
-                table.append(route)
+                table.append(route.copy())
         
         for route in table:
             # Convert the network and netmask to strings for serialization
