@@ -187,12 +187,26 @@ class Router:
             self.forwarding_table[route_key] = [new_packet] 
             
         # If we have not seen this packet's relationhip, add it to the relations
-        pprint(f"Current relations: {self.relations}")
+        # pprint(f"Current relations: {self.relations}")
+        # if network not in self.relations:
+        #     self.sockets[network] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        #     self.relations[network] = self.relations[srcif]
+        #     self.ports[network] = self.ports[srcif]
+        #     pprint(f"Updated Relations: {self.relations}")
+        
+        pprint(f"Current Relations: {self.relations}")
+        # Find similar relations if they already exists
+        for relation in self.relations:
+            if self.ip_in_network(relation, network, netmask):
+                self.sockets[network] = self.sockets[relation]
+                # self.relations[network] = self.relations[relation]
+                # self.ports[network] = self.ports[relation]
+                
+        # Otherwise create new entry
         if network not in self.relations:
-            self.sockets[network] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.relations[network] = self.relations[srcif]
-            self.ports[network] = self.ports[srcif]
-            pprint(f"Updated Relations: {self.relations}")
+            # self.ports[network] = self.ports[srcif]
+            # self.sockets[network] = self.socket[srcif]
             
         # Propagate the update to neighbors based on BGP policies
         self.propagate_update(srcif, message)
@@ -231,17 +245,11 @@ class Router:
                 propagated_message['src'] = self.our_addr(neighbor)
                 propagated_message['dst'] = neighbor
                 
-                # Rule 1: If update received from a customer, send to all other neighbors
-                if src_relationship == 'cust':
+                # Send the update to the neighbor if needed
+                if self.is_transaction_profitable(relation, self.relations[srcif]):
                     self.send(neighbor, json.dumps(propagated_message))
-                    
-                # Rule 2: If update received from a peer or provider, only send to customers
-                elif src_relationship in ['peer', 'provider'] and relation == 'cust':
-                    self.send(neighbor, json.dumps(propagated_message))
-                
-                # Otherwise log that we could not forward anywhere
                 else:
-                    print("Did not send anywhere.")
+                    print(f"Transaction not profitable: {relation} -> {self.relations[srcif]}")
     
     def process_route_withdrawal(self, packet):
         """Remove a route from the forwarding table.
@@ -383,8 +391,8 @@ class Router:
             if self.ip_in_network(dst, network, netmask):
                 for route in self.forwarding_table[(network, netmask)]:
                     self.relations[dst] = self.relations[network]
-                    self.sockets[dst] = self.sockets[network]
-                    self.ports[dst] = self.ports[network]
+                    # self.sockets[dst] = self.sockets[network]
+                    # self.ports[dst] = self.ports[network]
                     routes_found.append(route)
         
         # If no route is found, send a "no route" message back to the source
