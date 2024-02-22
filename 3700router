@@ -51,6 +51,7 @@ class Router:
 
     def send(self, network, message):
         if network not in self.sockets or network not in self.ports:
+            print(f"Socket has netowrk: {network in self.sockets} and port has network: {network in self.ports}")
             print(f"Error: Trying to send message to unknown network {network}")
             return
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
@@ -184,6 +185,14 @@ class Router:
             self.forwarding_table[route_key].append(new_packet)
         else:
             self.forwarding_table[route_key] = [new_packet] 
+            
+        # If we have not seen this packet's relationhip, add it to the relations
+        pprint(f"Current relations: {self.relations}")
+        if network not in self.relations:
+            self.sockets[network] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.relations[network] = self.relations[srcif]
+            self.ports[network] = self.ports[srcif]
+            pprint(f"Updated Relations: {self.relations}")
             
         # Propagate the update to neighbors based on BGP policies
         self.propagate_update(srcif, message)
@@ -358,11 +367,24 @@ class Router:
         dst = message['dst']
         payload = message['msg']
         
+        # If we have not seen this packet's relationhip, add it to the relations
+        # pprint(f"Current relations: {self.relations}")
+        # if dst not in self.relations:
+        #     print(f"Default Src: {src}")
+        #     print(f"Modified Src: {self.our_addr(src)}")
+            
+        #     self.relations[dst] = self.relations[self.our_addr(src)]
+        #     pprint(f"Updated relations: {self.relations}")
+                # Find all existing relations that this destination is in the same network of
+        
         # Attempt to find a route for the destination
         routes_found = []
         for network, netmask in self.forwarding_table.keys():
             if self.ip_in_network(dst, network, netmask):
                 for route in self.forwarding_table[(network, netmask)]:
+                    self.relations[dst] = self.relations[network]
+                    self.sockets[dst] = self.sockets[network]
+                    self.ports[dst] = self.ports[network]
                     routes_found.append(route)
         
         # If no route is found, send a "no route" message back to the source
@@ -370,54 +392,47 @@ class Router:
             self.send_no_route_message(src, dst)
         
         # If only one route is found, forward the packet to the next hop
+        pprint(f"Relationships: {self.relations}")
         if len(routes_found) >= 1:
             best_route =  self.find_best_route(routes_found)
             next_hop = best_route['next_hop']
-            relationship = self.relations[next_hop]
+            dst_relationship = self.relations[next_hop]
+            src_relationship = self.relations.get(src, '')
             
-            if self.is_transaction_profitable(relationship, self.relations[src]) == True:
+            if self.is_transaction_profitable(dst_relationship, src_relationship):
                 self.send(next_hop,
                           json.dumps({'type': 'data', 
                                     'src': src, 
                                     'dst': dst, 
                                     'payload': payload}))
             else:
-                print(f"Did not send data to {next_hop} because it is not a customer.")
-                # If your router drops a data message due to these restrictions, it 
-                # should send a “no route” message back to the source.
+                # Inform source that the transaction was not profitable
+                pprint(f"{src} Source Relationship Exists: {src in self.relations}")
+                print(f"Did not send data to {next_hop} because it is not a profitable transaction.")
                 self.send_no_route_message(src, dst)
             
-            # # Only send data to customers
-            # if relationship == 'cust' or self.relations[src] == 'cust':
-            #     self.send(next_hop, 
-            #             json.dumps({'type': 'data', 
-            #                         'src': src, 
-            #                         'dst': dst, 
-            #                         'payload': payload}))
-            # else:
-                # print(f"Did not send data to {next_hop} because it is not a customer.")
-                
-    def is_transaction_profitable(self, relationship, self_relation_src):
+    def is_transaction_profitable(self, dst_relation, src_relation):
         """Evaluates the protocol rules to determine if a message should be sent to a neighbor,
         assuming that an entry was found in the forwarding table.
         
         Args:
-            src (str): The source of the message.
-            dst (str): The destination of the message.
+            dst_relation (str): The relationship of the destination neighbor.
+            src_relation (str): The relationship of the source neighbor.
             
         Returns:
             bool: True if the transaction is profitable, False otherwise.
         """
-        # If the source or destination is a customer, transaction is profitable; send data
-        if relationship == 'cust' or self_relation_src == 'cust':
+        # If we received from a customer, send to all
+        if src_relation == 'cust' or dst_relation == 'cust':
             return True
         
-        # If the source router is a peer or provider, and the destination is a peer or provider,
-        # then the transaction is not profitable; drop the message
-        if ((relationship == 'peer' or relationship == 'provider') and 
-            (self_relation_src == 'peer' or self_relation_src == 'provider')):
-                return False
-        return AssertionError
+        # If we received from a peer or provider, only send to customers
+        if (src_relation in ['peer', 'provider'] and dst_relation == 'cust') \
+            or (dst_relation in ['peer', 'provider'] and src_relation == 'cust'):
+            return True
+        
+        # Otherwise return false
+        return False
     
     def ip_in_network(self, ip, network, netmask):
         """Check if an IP address is within a given network.
@@ -447,13 +462,14 @@ class Router:
         # Construct the no route message
         no_route_message = json.dumps({
             'type': 'no route',
-            'src': self.our_addr(dst),
+            'src': self.our_addr(src),
             'dst': dst,
             'msg': f"No route to {dst}"
         })
         
         # Send the message back to the source
-        self.send(self.our_addr(dst), no_route_message)
+        print("Sending no route message.")
+        self.send(self.our_addr(src), no_route_message)
         
     def compare_routes(self, route1, route2):
         """Compare two routes based on specified criteria.
