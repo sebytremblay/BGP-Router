@@ -199,7 +199,7 @@ class Router:
         for relation in self.relations:
             if self.ip_in_network(relation, network, netmask):
                 print(f"Found similar relation: {relation}")
-                self.sockets[network] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                # self.sockets[network] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 self.relations[network] = self.relations[relation]
                 self.ports[network] = self.ports[relation]
                 break
@@ -208,7 +208,7 @@ class Router:
         if network not in self.relations:
             self.relations[network] = self.relations[srcif]
             self.ports[network] = self.ports[srcif]
-            self.sockets[network] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # self.sockets[network] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             
         # Propagate the update to neighbors based on BGP policies
         self.propagate_update(srcif, message)
@@ -376,7 +376,7 @@ class Router:
             if self.ip_in_network(dst, network, netmask):
                 for route in self.forwarding_table[(network, netmask)]:
                     self.relations[dst] = self.relations[network]
-                    self.sockets[dst] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    # self.sockets[dst] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                     self.ports[dst] = self.ports[network]
                     routes_found.append(route)
         
