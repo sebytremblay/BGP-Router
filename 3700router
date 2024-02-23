@@ -3,7 +3,6 @@
 import argparse, socket, time, json, select, struct, sys, math
 from pprint import pprint
 from functools import cmp_to_key
-# import sort
 import copy
 
 class Router:
@@ -43,24 +42,35 @@ class Router:
         self.default_sockets = self.sockets.copy()
 
     def our_addr(self, dst):
-        """Returns the IP address of the router on the interface leading to the specified destination.
+            """Returns the IP address of the router on the interface leading to the specified destination.
 
-        Args:
-            dst (str): The name of the destination router.
+            Args:
+                dst (str): The name of the destination router.
 
-        Returns:
-            str: The IP address of the router on the interface leading to the specified destination.
-        """
-        quads = list(int(qdn) for qdn in dst.split('.'))
-        quads[3] = 1
-        return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
+            Returns:
+                str: The IP address of the router on the interface leading to the specified destination.
+            """
+            quads = list(int(qdn) for qdn in dst.split('.'))
+            quads[3] = 1
+            return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
 
     def send(self, network, message):
-        if network not in self.sockets or network not in self.ports:
-            # print(f"Socket has network: {network in self.sockets} and port has network: {network in self.ports}")
-            # print(f"Error: Trying to send message to unknown network {network}")
-            return
-        self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
+            """
+            Sends a message to the specified network.
+
+            Parameters:
+            network (str): The network to send the message to.
+            message (str): The message to be sent.
+
+            Returns:
+            None
+            """
+            # Check if the network is in the sockets and ports
+            if network not in self.sockets or network not in self.ports:
+                return
+            
+            # Sends a message to the specified network
+            self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
     
     def run(self):
         """Runs the router's main loop."""
@@ -75,16 +85,16 @@ class Router:
                         break
                 msg = k.decode('utf-8')
                 
+                # Handle the incoming message
                 self.handle_incoming_message(srcif, msg)
-
-                # print("Received message '%s' from %s" % (msg, srcif))
-    
+                    
     def handle_incoming_message(self, srcif, message, log=True):
         """Process incoming messages from neighbors.
         
         Args:
             srcif (str): The name of the interface on which the message was received.
-            message (str): The message that was received."""
+            message (str): The message that was received.
+            log (bool): Whether to log the message for debugging purposes."""
         # Attempt to parse the message as JSON
         try:
             json_message = json.loads(message)
@@ -105,24 +115,12 @@ class Router:
             self.process_route_withdrawal(json_message)
         elif message_type == 'data':
             self.process_data(json_message, log)
-        elif message_type == 'handshake':
-            self.process_handshake(json_message['src'], json_message['dst'])
         elif message_type == 'dump':
             self.process_dump(json_message['src'], json_message['msg'])
         elif message_type == 'table' or message_type == 'no route':
             raise NotImplementedError()
         else:
             print(f"Unknown message type received: {message_type}")
-            
-    def process_handshake(self, src, dst):
-        """Process handshake messages to establish connections with neighbors.
-        
-        Args:
-            src (str): The source IP address of the handshake.
-            dst (str): The destination IP address of the handshake.
-        """
-        # Acknowledge the handshake for logging or debugging purposes
-        self.log_message(f"Handshake established with {src}.") 
 
     def process_route_update(self, srcif, message, log=True):
         """Update the forwarding table based on a received route update.
@@ -130,6 +128,7 @@ class Router:
         Args:
             srcif (str): The interface on which the update was received.
             message (dict): The route update message.
+            log (bool): Whether to log the message for debugging purposes.
         """
         # Do nothing is msg body does not have expect fields
         expected_fields = ['network', 'netmask', 'localpref', 'ASPath', 'origin', 'selfOrigin']
