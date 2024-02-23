@@ -293,7 +293,7 @@ class Router:
         
         # # Rebuild the table
         # prev_table = self.forwarding_table.copy()
-        self.rebuild_table()
+        # self.rebuild_table()
         # print("="*80)
         # pprint(f"Previous Table: {prev_table}")
         # pprint(f"New Table: {self.forwarding_table}")
