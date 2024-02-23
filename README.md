@@ -24,35 +24,27 @@ We modified the `3700router.py` file to implement the required functionality for
 
 The [`3700router`] script implements a simplified BGP router. When the router starts, it establishes connections with its peers and exchanges handshake messages. After that, it listens for incoming BGP messages and handles them according to the BGP protocol.
 
-The router maintains a forwarding table and an updates cache. When it receives a route announcement, it adds the route to the forwarding table and the updates cache. When it receives a route withdrawal, it removes the route from the forwarding table and the updates cache, and then disaggregates the forwarding table.
-
-- Implemented the BGP protocol to establish and maintain BGP sessions with neighboring routers.
-- Handled the exchange of BGP messages, including OPEN, UPDATE, KEEPALIVE, and NOTIFICATION messages.
-- Implemented the decision process for selecting the best route based on BGP attributes.
-- Handled the advertisement and withdrawal of routes to and from neighboring routers.
+The router maintains a forwarding table and an updates cache. When it receives a route announcement, it adds the route to the forwarding table and the updates cache. When it receives a route withdrawal, it removes the route from the forwarding table. Then, we remove all updates that have the specified network, netmask, and source. We then delete the table and rebuild it from the new updates cache in order to account for the aggregation.
 
 #### Challenges Faced
 
 One of the main challenges was handling route aggregation and disaggregation correctly. When a route is announced, the router needs to aggregate the forwarding table to combine adjacent routes. When a route is withdrawn, the router needs to disaggregate the forwarding table to break down aggregated routes.
 
-- Understanding the BGP protocol and its message format.
-- Handling the different BGP attributes and their impact on route selection.
-- Ensuring the correct handling of BGP session establishment and maintenance.
-- Implementing error handling and error reporting for BGP messages.
+However, our biggest issue was that when we were rebuilding the table from the parsed updates cache after withdrawal, the table contained incorrect update information. We met with 4 different TA's about this issue, none of whom were able to figure out the bug in the code. We also consulted Professor Jackson. As such, we were unable to resolve the issue and commented out the rebuild_table method call when processing route withdrawals.
 
 #### Properties/Features
 
-The [`3700router`] script supports the following BGP messages: OPEN, UPDATE, KEEPALIVE, and NOTIFICATION. It handles route announcements and withdrawals, and it maintains a forwarding table and an updates cache. It also supports route aggregation and disaggregation.
-
-- Establishes BGP sessions with neighboring routers.
-- Exchanges BGP messages to exchange routing information.
-- Implements the decision process to select the best route.
-- Advertises and withdraws routes to and from neighboring routers.
-- Handles BGP session establishment and maintenance.
+The [`3700router`] script supports the following BGP messages: UPDATE, WITHDRAW, HANDSHAKE, DATA, and DUMP. It handles route announcements and withdrawals, and it maintains a forwarding table and an updates cache. It also supports route aggregation and disaggregation.
 
 #### Testing Overview
 
 The [`run`] script is used to test the router with different configuration files. Each configuration file simulates a different routing scenario, and the script checks that the router handles each scenario correctly.
+
+We individually ran each of the configuration files and reviewed the output log for correctness.
+
+```bash
+./run config/x-x
+```
 
 The [`test`] script can be used to run a suite of tests automatically:
 
